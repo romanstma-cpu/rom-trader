@@ -1,0 +1,196 @@
+export interface Position {
+  ticker: string;
+  title: string;
+  side: "yes";
+  entryCents: number;
+  contracts: number;
+  currentBidCents: number;
+  peakMidCents: number;
+  unrealizedUsd: number;
+  openedAt: number;
+}
+
+export interface Signal {
+  ticker: string;
+  title: string;
+  midCents: number;
+  bidCents: number;
+  askCents: number;
+  spreadCents: number;
+  changeCents: number | null;
+  eligible: boolean;
+  reason: string;
+  ts: number;
+}
+
+export interface ScannerStats {
+  marketsScanned: number;
+  tracked: number;
+  eligible: number;
+  skippedSpread: number;
+  skippedPrice: number;
+  skippedWarmup: number;
+  scanMs: number;
+}
+
+export interface EngineState {
+  status: "stopped" | "running" | "error";
+  dryRun: boolean;
+  authConfigured: boolean;
+  cashUsd: number;
+  equityUsd: number;
+  sessionPnlUsd: number;
+  allTimePnlUsd: number;
+  todayPnlUsd: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  positions: Position[];
+  maxPositions: number;
+  lastTickAt: number | null;
+  lastError: string | null;
+  haltedReason: string | null;
+  scanner: ScannerStats | null;
+  startedAt: number | null;
+}
+
+export interface LogLine {
+  ts: number;
+  level: "info" | "trade" | "warn" | "error";
+  msg: string;
+}
+
+export interface Settings {
+  apiKeyId: string;
+  apiPrivateKeyPem: string;
+  liveMode: boolean;
+  dryRunCash: number;
+  tradeSizeUsd: number;
+  maxPositions: number;
+  momentumThresholdCents: number;
+  takeProfitCents: number;
+  stopLossCents: number;
+  tickSeconds: number;
+  maxSpreadCents: number;
+  minPriceCents: number;
+  maxPriceCents: number;
+  dailyLossLimitUsd: number;
+}
+
+export type StrategyParams = Omit<
+  Settings,
+  "apiKeyId" | "apiPrivateKeyPem" | "liveMode" | "dryRunCash"
+>;
+
+export interface Strategy {
+  id: string;
+  name: string;
+  tagline: string;
+  detail: string;
+  risk: "low" | "medium" | "high";
+  params: StrategyParams;
+}
+
+export interface Profile {
+  name: string;
+  savedAt: number;
+  params: Omit<Settings, "apiKeyId" | "apiPrivateKeyPem" | "liveMode">;
+}
+
+export interface AppSettings {
+  disclaimerAccepted: boolean;
+  startMinimized: boolean;
+  startWithWindows: boolean;
+}
+
+export interface TradeRecord {
+  ticker: string;
+  title: string;
+  side: "yes";
+  entryCents: number;
+  exitCents: number;
+  contracts: number;
+  pnlUsd: number;
+  openedAt: number;
+  closedAt: number;
+  reason: string;
+  dryRun: boolean;
+}
+
+export interface EquityPoint {
+  ts: number;
+  equityUsd: number;
+}
+
+export interface TestResult {
+  ok: boolean;
+  balanceUsd?: number;
+  message: string;
+}
+
+export interface ExportResult {
+  saved: boolean;
+  message: string;
+  filePath?: string;
+}
+
+export interface RomApi {
+  engine: {
+    start: () => Promise<void>;
+    stop: () => Promise<void>;
+    flatten: () => Promise<number>;
+    getState: () => Promise<EngineState>;
+    getLogs: () => Promise<LogLine[]>;
+    getSignals: () => Promise<Signal[]>;
+    onState: (cb: (s: EngineState) => void) => () => void;
+    onLog: (cb: (l: LogLine) => void) => () => void;
+  };
+  settings: {
+    get: () => Promise<Settings>;
+    set: (s: Settings) => Promise<Settings>;
+  };
+  history: {
+    get: () => Promise<TradeRecord[]>;
+    clear: () => Promise<TradeRecord[]>;
+    export: () => Promise<ExportResult>;
+  };
+  equity: { get: () => Promise<EquityPoint[]> };
+  strategies: {
+    list: () => Promise<Strategy[]>;
+    apply: (id: string) => Promise<Settings>;
+  };
+  profiles: {
+    list: () => Promise<Profile[]>;
+    save: (name: string) => Promise<Profile[]>;
+    apply: (name: string) => Promise<Settings>;
+    delete: (name: string) => Promise<Profile[]>;
+  };
+  kalshi: {
+    test: () => Promise<TestResult>;
+    balance: () => Promise<number | null>;
+  };
+  app: {
+    version: () => Promise<string>;
+    dataDir: () => Promise<string>;
+    openDataFolder: () => Promise<string>;
+    openMarket: (ticker: string) => Promise<void>;
+    factoryReset: () => Promise<Settings>;
+  };
+  state: {
+    get: () => Promise<AppSettings>;
+    set: (patch: Partial<AppSettings>) => Promise<AppSettings>;
+  };
+  window: {
+    minimize: () => void;
+    maximize: () => void;
+    close: () => void;
+    isMaximized: () => Promise<boolean>;
+    onMaximizeChange: (cb: (v: boolean) => void) => () => void;
+  };
+}
+
+declare global {
+  interface Window {
+    rom: RomApi;
+  }
+}

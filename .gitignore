@@ -1,0 +1,15 @@
+node_modules/
+
+# build output
+dist/
+dist-electron/
+release/
+
+# bundled from test/headless.ts
+test/headless.js
+
+# local editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
