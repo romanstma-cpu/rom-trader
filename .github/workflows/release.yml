@@ -1,0 +1,92 @@
+name: Build and release
+
+# Tag a version to publish it:
+#   npm version 1.1.3 && git push --follow-tags
+#
+# Running this by hand (workflow_dispatch) builds and tests without publishing,
+# which is the safe way to check the pipeline after changing it.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck and unit tests
+        run: npm run check
+
+      # Exercises the credential vault against real Windows DPAPI rather than
+      # the stub the unit suite uses.
+      - name: Real DPAPI
+        run: npm run dpapi
+
+      - name: Build
+        run: npm run build
+
+      - name: Package installer
+        run: npx electron-builder --win --publish never
+        env:
+          # electron-builder picks these up on its own when they exist, so
+          # signing needs no config change - only the secrets.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $exe = "release/ROM-Trader-Setup.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ROM-Trader-Setup.exe" | Out-File release/SHA256SUMS.txt -Encoding ascii -NoNewline
+          Write-Host "SHA256 $hash"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ROM-Trader-Setup
+          path: |
+            release/ROM-Trader-Setup.exe
+            release/latest.yml
+            release/SHA256SUMS.txt
+          retention-days: 14
+
+      # Releases live in romanstma-cpu/rom-apps, a different repository, so the
+      # automatic GITHUB_TOKEN cannot write them. Add a fine-grained PAT with
+      # Contents: read and write on rom-apps as the RELEASE_TOKEN secret to
+      # turn this on; without it the installer is still attached to the run
+      # above and can be uploaded by hand.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if (-not $env:GH_TOKEN) {
+            Write-Host "::warning::RELEASE_TOKEN is not set - skipping publish. The installer is attached to this run as an artifact."
+            exit 0
+          }
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            --repo romanstma-cpu/rom-apps `
+            --title "ROM Trader $($tag.TrimStart('v'))" `
+            --generate-notes `
+            release/ROM-Trader-Setup.exe `
+            release/ROM-Trader-Setup.exe.blockmap `
+            release/latest.yml `
+            release/SHA256SUMS.txt
