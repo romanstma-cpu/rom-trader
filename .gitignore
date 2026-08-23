@@ -5,9 +5,10 @@ dist/
 dist-electron/
 release/
 
-# bundled from test/headless.ts
+# bundled from the .ts sources beside them
 test/headless.js
 test/playtest.js
+test/dpapi-check.js
 
 # local editor / OS noise
 .vscode/
