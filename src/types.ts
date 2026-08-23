@@ -33,7 +33,21 @@ export interface ScannerStats {
   skippedCooldown: number;
   skippedClock: number;
   skippedFees: number;
+  skippedRegime: number;
   scanMs: number;
+}
+
+/** A resting maker order that has not filled yet. Its cash is already reserved. */
+export interface PendingOrder {
+  ticker: string;
+  title: string;
+  side: "yes";
+  limitCents: number;
+  contracts: number;
+  costUsd: number;
+  placedAt: number;
+  ticksLeft: number;
+  orderId: string | null;
 }
 
 export interface EngineState {
@@ -49,6 +63,7 @@ export interface EngineState {
   losses: number;
   winRate: number | null;
   positions: Position[];
+  pendingOrders: PendingOrder[];
   maxPositions: number;
   lastTickAt: number | null;
   lastError: string | null;
@@ -84,6 +99,11 @@ export interface Settings {
   tradingHoursEnabled: boolean;
   tradingStartHour: number;
   tradingEndHour: number;
+  makerEntries: boolean;
+  makerTtlTicks: number;
+  minNetEdgeCents: number;
+  regimeFilterEnabled: boolean;
+  maxDrawdownPct: number;
 }
 
 export interface CredentialStatus {
@@ -176,6 +196,26 @@ export interface RecordingInfo {
   lastTs: number | null;
 }
 
+export interface PerformanceMetrics {
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  grossWinUsd: number;
+  grossLossUsd: number;
+  profitFactor: number | null;
+  avgWinUsd: number | null;
+  avgLossUsd: number | null;
+  payoffRatio: number | null;
+  expectancyUsd: number | null;
+  sharpePerTrade: number | null;
+  sortinoPerTrade: number | null;
+  maxDrawdownUsd: number;
+  maxDrawdownPct: number | null;
+  longestWinStreak: number;
+  longestLossStreak: number;
+}
+
 export interface BacktestResult {
   label: string;
   trades: number;
@@ -190,6 +230,7 @@ export interface BacktestResult {
   haltedReason: string | null;
   equity: { ts: number; equityUsd: number }[];
   exitReasons: Record<string, number>;
+  metrics: PerformanceMetrics;
 }
 
 export interface InstallRefusal {

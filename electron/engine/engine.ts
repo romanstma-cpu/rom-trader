@@ -1,6 +1,11 @@
 import type { Credentials } from "./credentials";
 import { KalshiClient, KalshiMarket } from "./kalshi";
-import { netEdgeCents, roundTripFeeCentsPerContract, takerFeeUsd } from "./fees";
+import {
+  netEdgeCents,
+  roundTripFeeCentsPerContract,
+  takerFeeCentsPerContract,
+  takerFeeUsd,
+} from "./fees";
 import {
   EquityPoint,
   Settings,
@@ -22,6 +27,28 @@ export interface Position {
   /** Taker fee already paid to open, carried so the exit can net it out. */
   entryFeeUsd: number;
   openedAt: number;
+}
+
+/**
+ * A resting maker order that has not filled yet.
+ *
+ * Its cash is already debited — Kalshi reserves balance for resting orders,
+ * and paper mode mirrors that so the two report the same number. The money
+ * comes back if the order expires unfilled.
+ */
+export interface PendingOrder {
+  ticker: string;
+  title: string;
+  side: "yes";
+  limitCents: number;
+  contracts: number;
+  /** Cash reserved at placement; refunded on expiry or cancellation. */
+  costUsd: number;
+  placedAt: number;
+  /** Scans left before the order is cancelled unfilled. */
+  ticksLeft: number;
+  /** Kalshi's order id in live mode; null on paper. */
+  orderId: string | null;
 }
 
 /** One market the scanner looked at on the most recent tick. */
@@ -48,8 +75,10 @@ export interface ScannerStats {
   skippedCooldown: number;
   /** Blocked because the clock is outside the configured trading window. */
   skippedClock: number;
-  /** Blocked because the take-profit cannot clear the round-trip fee. */
+  /** Blocked because the take-profit cannot clear the fees by enough. */
   skippedFees: number;
+  /** Blocked because recent moves have been mean-reverting, not trending. */
+  skippedRegime: number;
   scanMs: number;
 }
 
@@ -66,6 +95,7 @@ export interface EngineState {
   losses: number;
   winRate: number | null;
   positions: Position[];
+  pendingOrders: PendingOrder[];
   maxPositions: number;
   lastTickAt: number | null;
   lastError: string | null;
@@ -160,6 +190,9 @@ export class TradingEngine {
   private cashUsd = 0;
   private sessionRealizedUsd = 0;
   private positions: Position[] = [];
+  private pendingOrders: PendingOrder[] = [];
+  /** Session-high equity, for the drawdown brake and drawdown-scaled sizing. */
+  private peakEquityUsd = 0;
   private priceHistory = new Map<string, number[]>(); // ticker -> recent mids (cents)
   private cooldownUntil = new Map<string, number>(); // ticker -> ms timestamp
   private signals: Signal[] = [];
@@ -182,6 +215,7 @@ export class TradingEngine {
     this.store = store;
     this.client = new KalshiClient(credentials.apiKeyId, credentials.apiPrivateKeyPem);
     this.cashUsd = settings.dryRunCash;
+    this.peakEquityUsd = settings.dryRunCash;
   }
 
   subscribe(l: Listener): void {
@@ -253,6 +287,7 @@ export class TradingEngine {
       losses,
       winRate: wins + losses > 0 ? wins / (wins + losses) : null,
       positions: this.positions,
+      pendingOrders: this.pendingOrders,
       maxPositions: this.settings.maxPositions,
       lastTickAt: this.lastTickAt,
       lastError: this.lastError,
@@ -268,9 +303,13 @@ export class TradingEngine {
   }
 
   private equity(): number {
+    // Reserved order cash counts: it comes back if the order expires, and
+    // leaving it out would make every resting order look like an instant loss
+    // large enough to trip the drawdown brake.
     return (
       this.cashUsd +
-      this.positions.reduce((s, p) => s + (p.currentBidCents * p.contracts) / 100, 0)
+      this.positions.reduce((s, p) => s + (p.currentBidCents * p.contracts) / 100, 0) +
+      this.pendingOrders.reduce((s, o) => s + o.costUsd, 0)
     );
   }
 
@@ -281,9 +320,11 @@ export class TradingEngine {
     this.haltedReason = null;
     this.sessionRealizedUsd = 0;
     this.cashUsd = this.settings.dryRunCash;
+    this.peakEquityUsd = this.settings.dryRunCash;
     this.startedAt = Date.now();
     this.priceHistory.clear();
     this.cooldownUntil.clear();
+    this.pendingOrders = [];
     this.signals = [];
     this.emptyScans = 0;
     this.log(
@@ -299,7 +340,8 @@ export class TradingEngine {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    // close all open positions at current bid
+    // cancel resting orders first, then close all open positions at current bid
+    for (const o of [...this.pendingOrders]) this.cancelPending(o, "engine stopped");
     for (const p of [...this.positions]) this.closePosition(p, "engine stopped");
     this.status = "stopped";
     this.startedAt = null;
@@ -309,10 +351,17 @@ export class TradingEngine {
 
   /** Closes every open position at the current bid but leaves the engine running. */
   flatten(): number {
+    const orders = this.pendingOrders.length;
+    for (const o of [...this.pendingOrders]) this.cancelPending(o, "flattened by user");
     const n = this.positions.length;
-    if (n === 0) return 0;
+    if (n === 0 && orders === 0) return 0;
     for (const p of [...this.positions]) this.closePosition(p, "flattened by user");
-    this.log("warn", `Flattened ${n} position${n === 1 ? "" : "s"} on request`);
+    this.log(
+      "warn",
+      `Flattened ${n} position${n === 1 ? "" : "s"}` +
+        (orders > 0 ? ` and cancelled ${orders} resting order${orders === 1 ? "" : "s"}` : "") +
+        ` on request`,
+    );
     this.emitState();
     return n;
   }
@@ -328,10 +377,12 @@ export class TradingEngine {
       // Recorded before any decision is made, so a replay sees exactly what
       // this tick saw. Only for live sweeps — a replay must not record itself.
       this.record?.(markets);
+      this.processPendingOrders(markets);
       this.updatePositions(markets);
       this.scanForEntries(markets, began);
       this.enforceDailyLossLimit();
       this.enforceLosingStreak();
+      this.enforceMaxDrawdown();
       this.store.appendEquity({ ts: Date.now(), equityUsd: round2(this.equity()) });
       this.emitState();
     } catch (e) {
@@ -408,9 +459,17 @@ export class TradingEngine {
         s.skippedWarmup -
         s.skippedCooldown -
         s.skippedClock -
-        s.skippedFees,
+        s.skippedFees -
+        s.skippedRegime,
     );
     const causes = [
+      {
+        n: s.skippedRegime,
+        msg:
+          `${s.skippedRegime} of ${s.marketsScanned} markets are being skipped by the regime ` +
+          `filter because their recent moves have reversed rather than continued. Turn it off in ` +
+          `Settings to trade them anyway.`,
+      },
       {
         n: s.skippedSpread,
         msg:
@@ -497,9 +556,11 @@ export class TradingEngine {
       skippedCooldown: 0,
       skippedClock: 0,
       skippedFees: 0,
+      skippedRegime: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
+    const maker = this.settings.makerEntries;
 
     for (const m of markets) {
       const hist = this.priceHistory.get(m.ticker) ?? [];
@@ -516,6 +577,7 @@ export class TradingEngine {
 
       let eligible = false;
       let reason: string;
+      let autocorr: number | null = null;
 
       if (!clockAllows) {
         // Checked first so that outside the window every market says the same
@@ -535,13 +597,32 @@ export class TradingEngine {
         stats.skippedWarmup++;
       } else if (change < this.settings.momentumThresholdCents) {
         reason = `momentum ${fmtCents(change)} under ${this.settings.momentumThresholdCents}c trigger`;
-      } else if (netEdgeCents(this.settings.takeProfitCents, m.yes_ask) <= 0) {
-        // The take-profit does not cover the round-trip fee at this price, so
-        // the trade loses money even when it works. No win rate rescues that.
-        reason =
-          `take-profit ${this.settings.takeProfitCents}c does not clear the ` +
-          `${roundTripFeeCentsPerContract(m.yes_ask).toFixed(1)}c round-trip fee at ${m.yes_ask}c`;
+      } else if (
+        // A maker enters at the bid and pays no entry fee; a taker enters at
+        // the ask and pays the fee twice. The edge check has to price the
+        // trade the way it will actually be done, or it refuses the wrong ones.
+        netEdgeCents(this.settings.takeProfitCents, maker ? m.yes_bid : m.yes_ask, maker) <=
+        this.settings.minNetEdgeCents
+      ) {
+        // Even when the trade clears the fees, an edge of half a cent is not
+        // worth the risk being taken to collect it. See minNetEdgeCents.
+        reason = maker
+          ? `take-profit ${this.settings.takeProfitCents}c clears the ` +
+            `${takerFeeCentsPerContract(m.yes_bid).toFixed(1)}c exit fee by under ` +
+            `${this.settings.minNetEdgeCents}c at ${m.yes_bid}c`
+          : `take-profit ${this.settings.takeProfitCents}c clears the ` +
+            `${roundTripFeeCentsPerContract(m.yes_ask).toFixed(1)}c round-trip fee by under ` +
+            `${this.settings.minNetEdgeCents}c at ${m.yes_ask}c`;
         stats.skippedFees++;
+      } else if (
+        this.settings.regimeFilterEnabled &&
+        (autocorr = lag1Autocorrelation(hist)) !== null &&
+        autocorr < 0
+      ) {
+        // A momentum rule assumes the last move predicts the next one. When
+        // the recent record says the opposite, entering is buying head-fakes.
+        reason = `recent moves mean-revert (autocorr ${autocorr.toFixed(2)}) — regime filter`;
+        stats.skippedRegime++;
       } else if (this.coolingDown(m.ticker)) {
         // Without this the same tick that takes profit re-buys at the ask,
         // paying the spread again on a position we just sold at the bid.
@@ -568,9 +649,13 @@ export class TradingEngine {
       });
 
       if (!eligible) continue;
-      if (this.positions.length >= this.settings.maxPositions) continue;
+      // Resting orders count toward the cap: each one is committed cash that
+      // becomes a position the moment someone sells into it.
+      if (this.positions.length + this.pendingOrders.length >= this.settings.maxPositions) continue;
       if (this.positions.some((p) => p.ticker === m.ticker)) continue;
-      this.openPosition(m);
+      if (this.pendingOrders.some((o) => o.ticker === m.ticker)) continue;
+      if (maker) this.placeMakerOrder(m);
+      else this.openPosition(m);
     }
 
     stats.scanMs = Date.now() - began;
@@ -583,7 +668,8 @@ export class TradingEngine {
   }
 
   private openPosition(m: KalshiMarket): void {
-    const contracts = Math.floor((this.settings.tradeSizeUsd * 100) / m.yes_ask);
+    const factor = this.sizeFactor();
+    const contracts = Math.floor((this.settings.tradeSizeUsd * factor * 100) / m.yes_ask);
     if (contracts < 1) return;
     const costUsd = (m.yes_ask * contracts) / 100;
     if (costUsd > this.cashUsd) {
@@ -628,7 +714,9 @@ export class TradingEngine {
     this.log(
       "trade",
       `OPEN ${m.ticker} — ${contracts}x YES @ ${m.yes_ask}c ` +
-        `(${money(costUsd)}) [${m.title.slice(0, 60)}]`,
+        `(${money(costUsd)})` +
+        (factor < 0.999 ? ` [size scaled to ${Math.round(factor * 100)}% by drawdown]` : "") +
+        ` [${m.title.slice(0, 60)}]`,
     );
     this.emitEvent({
       kind: "opened",
@@ -636,6 +724,225 @@ export class TradingEngine {
       title: `Opened ${m.ticker}`,
       body: `${contracts} contracts at ${m.yes_ask}c · ${money(costUsd)}`,
     });
+  }
+
+  /**
+   * Rests a buy at the bid instead of crossing to the ask.
+   *
+   * Joining the bid rather than improving it keeps the order a maker even if
+   * the book moves; the entire economics of this mode rest on never paying
+   * the taker fee or the spread on entry.
+   */
+  private placeMakerOrder(m: KalshiMarket): void {
+    const factor = this.sizeFactor();
+    const limitCents = m.yes_bid;
+    const contracts = Math.floor((this.settings.tradeSizeUsd * factor * 100) / limitCents);
+    if (contracts < 1) return;
+    const costUsd = (limitCents * contracts) / 100;
+    if (costUsd > this.cashUsd) {
+      this.log("warn", `Skipped ${m.ticker} — needs ${money(costUsd)}, cash is ${money(this.cashUsd)}`);
+      return;
+    }
+
+    const order: PendingOrder = {
+      ticker: m.ticker,
+      title: m.title,
+      side: "yes",
+      limitCents,
+      contracts,
+      costUsd,
+      placedAt: Date.now(),
+      ticksLeft: this.settings.makerTtlTicks,
+      orderId: null,
+    };
+    // Reserved immediately, the way Kalshi holds balance against resting
+    // orders, so paper and live report the same cash number.
+    this.cashUsd -= costUsd;
+    this.pendingOrders.push(order);
+
+    if (this.isLive) {
+      void this.client
+        .placeLimitBuy(m.ticker, contracts, limitCents)
+        .then((id) => {
+          order.orderId = id;
+        })
+        .catch((e) => {
+          // Kalshi refused (post_only would have crossed, insufficient funds,
+          // closed market). The paper-side reservation must be unwound or the
+          // engine trades as if the money were still committed.
+          this.cancelPending(order, `Kalshi rejected the order: ${(e as Error).message}`);
+        });
+    }
+
+    this.log(
+      "trade",
+      `REST ${m.ticker} — ${contracts}x YES limit ${limitCents}c (maker, ` +
+        `${this.settings.makerTtlTicks} scans to fill)` +
+        (factor < 0.999 ? ` [size scaled to ${Math.round(factor * 100)}% by drawdown]` : ""),
+    );
+  }
+
+  /**
+   * Walks resting orders once per scan: fills, then expiry.
+   *
+   * The paper fill rule is deliberately conservative — a resting buy at L
+   * fills only when the ask trades down to L or through it, meaning someone
+   * actually sold into the bid. Assuming a fill merely because the bid was
+   * touched flatters the strategy; queue position at Kalshi is unknowable
+   * from here, and an optimistic fill model is how a backtest lies.
+   */
+  private processPendingOrders(markets: KalshiMarket[]): void {
+    if (this.pendingOrders.length === 0) return;
+    const byTicker = new Map(markets.map((m) => [m.ticker, m]));
+
+    for (const o of [...this.pendingOrders]) {
+      o.ticksLeft -= 1;
+
+      if (this.isLive) {
+        // Live fills come from Kalshi's answer, never from the paper rule: the
+        // two can disagree, and only one of them moved real money.
+        if (o.ticksLeft <= 0) {
+          if (o.orderId) {
+            void this.client.cancelOrder(o.orderId).catch((e) => {
+              // Most likely the order filled in the race between our decision
+              // and the cancel. The next poll of positions will not see it,
+              // so tell the user to look rather than guessing.
+              this.log(
+                "warn",
+                `Could not cancel resting order on ${o.ticker}: ${(e as Error).message}. ` +
+                  `Check your Kalshi orders page.`,
+              );
+            });
+          }
+          this.cancelPending(o, "unfilled when its time ran out");
+        } else if (o.orderId) {
+          void this.pollLiveOrder(o, byTicker.get(o.ticker) ?? null);
+        }
+        continue;
+      }
+
+      const m = byTicker.get(o.ticker);
+      if (m && m.yes_ask <= o.limitCents) {
+        this.fillPending(o, o.contracts, m);
+        continue;
+      }
+      if (o.ticksLeft <= 0) this.cancelPending(o, "unfilled when its time ran out");
+    }
+  }
+
+  /** Asks Kalshi how a live resting order is doing and mirrors the answer. */
+  private async pollLiveOrder(o: PendingOrder, m: KalshiMarket | null): Promise<void> {
+    try {
+      const st = await this.client.getOrder(o.orderId!);
+      if (!this.pendingOrders.includes(o)) return; // resolved while we waited
+      if (st.status === "executed" || st.filledCount >= o.contracts) {
+        this.fillPending(o, o.contracts, m);
+      } else if (st.status === "canceled") {
+        // Cancelled outside this app — from the Kalshi site, or by the
+        // exchange. A partial fill before the cancel is still a position.
+        if (st.filledCount > 0) this.fillPending(o, st.filledCount, m);
+        else this.cancelPending(o, "cancelled on Kalshi");
+      }
+    } catch (e) {
+      this.log("warn", `Could not check resting order on ${o.ticker}: ${(e as Error).message}`);
+    }
+  }
+
+  /** Turns a resting order (or the filled part of one) into a tracked position. */
+  private fillPending(o: PendingOrder, filledContracts: number, m: KalshiMarket | null): void {
+    if (!this.pendingOrders.includes(o)) return; // guard against double resolution
+    this.pendingOrders = this.pendingOrders.filter((x) => x !== o);
+
+    const filled = Math.min(o.contracts, Math.max(1, Math.round(filledContracts)));
+    // Money reserved for the unfilled remainder comes back.
+    this.cashUsd += (o.limitCents * (o.contracts - filled)) / 100;
+
+    const bid = m?.yes_bid ?? o.limitCents;
+    const mid = m ? this.mid(m) : o.limitCents;
+    this.positions.push({
+      ticker: o.ticker,
+      title: o.title,
+      side: "yes",
+      entryCents: o.limitCents,
+      contracts: filled,
+      currentBidCents: bid,
+      peakMidCents: mid,
+      // A maker pays nothing to open. Only the taker exit is inevitable, so a
+      // fresh fill at the bid shows one fee down, not a spread and two.
+      unrealizedUsd: round2(((bid - o.limitCents) * filled) / 100 - takerFeeUsd(filled, bid)),
+      entryFeeUsd: 0,
+      openedAt: Date.now(),
+    });
+
+    this.log(
+      "trade",
+      `FILL ${o.ticker} — ${filled}x YES @ ${o.limitCents}c (maker, no entry fee)` +
+        (filled < o.contracts ? ` [${o.contracts - filled} unfilled returned]` : ""),
+    );
+    this.emitEvent({
+      kind: "opened",
+      tone: "info",
+      title: `Filled ${o.ticker}`,
+      body: `${filled} contracts at ${o.limitCents}c · resting order filled`,
+    });
+  }
+
+  /** Removes a resting order and returns its reserved cash. */
+  private cancelPending(o: PendingOrder, why: string): void {
+    if (!this.pendingOrders.includes(o)) return;
+    this.pendingOrders = this.pendingOrders.filter((x) => x !== o);
+    this.cashUsd += o.costUsd;
+    this.log("info", `EXPIRE ${o.ticker} — ${o.contracts}x limit ${o.limitCents}c: ${why}`);
+  }
+
+  /** Session drawdown from peak equity, in percent. */
+  private drawdownPct(): number {
+    if (this.peakEquityUsd <= 0) return 0;
+    return Math.max(0, ((this.peakEquityUsd - this.equity()) / this.peakEquityUsd) * 100);
+  }
+
+  /**
+   * Fraction of the configured trade size currently allowed.
+   *
+   * Shrinks linearly from 1 toward 0.25 as drawdown approaches the halt line,
+   * so a bad run bleeds slower the worse it gets. Kelly sizing was considered
+   * and rejected: it needs a trusted edge estimate, and estimating one from a
+   * rolling handful of trades produces size swings that are noise, not risk
+   * management. With no demonstrated positive edge, Kelly's honest answer is
+   * zero — which is what the halt line is for.
+   */
+  private sizeFactor(): number {
+    const limit = this.settings.maxDrawdownPct;
+    if (limit <= 0) return 1;
+    const dd = this.drawdownPct();
+    if (dd <= 0) return 1;
+    return Math.max(0.25, 1 - (0.75 * dd) / limit);
+  }
+
+  /**
+   * The brake behind the scaling: past the line, stop guessing and stop.
+   * Realises the loss by closing everything, which is what a hard drawdown
+   * stop means — an unrealised hole this deep is not something to sit in
+   * unattended hoping it refills.
+   */
+  private enforceMaxDrawdown(): void {
+    const eq = this.equity();
+    if (eq > this.peakEquityUsd) this.peakEquityUsd = eq;
+    const limit = this.settings.maxDrawdownPct;
+    if (limit <= 0 || this.status !== "running") return;
+    const dd = this.drawdownPct();
+    if (dd < limit) return;
+    this.haltedReason =
+      `Equity is down ${dd.toFixed(1)}% from its session peak (limit ${limit}%). ` +
+      `Engine stopped itself. Review the strategy, then raise or clear the limit in Settings to resume.`;
+    this.log("warn", this.haltedReason);
+    this.emitEvent({
+      kind: "halted",
+      tone: "bad",
+      title: "ROM Trader stopped itself",
+      body: `Equity down ${dd.toFixed(1)}% from its session peak.`,
+    });
+    this.stop();
   }
 
   private closePosition(p: Position, reason: string): void {
@@ -751,6 +1058,35 @@ export class TradingEngine {
       }
     }
   }
+}
+
+/**
+ * Lag-1 autocorrelation of the changes in a price series.
+ *
+ * Positive means recent moves have continued (trending); negative means they
+ * have reversed (chopping). Needs eight changes before it says anything —
+ * fewer and the number is an anecdote, so null is returned and the filter
+ * stays out of the way rather than blocking on noise.
+ */
+export function lag1Autocorrelation(prices: number[]): number | null {
+  const diffs: number[] = [];
+  for (let i = 1; i < prices.length; i++) diffs.push(prices[i] - prices[i - 1]);
+  if (diffs.length < 8) return null;
+
+  const a = diffs.slice(0, -1);
+  const b = diffs.slice(1);
+  const meanA = a.reduce((x, y) => x + y, 0) / a.length;
+  const meanB = b.reduce((x, y) => x + y, 0) / b.length;
+  let cov = 0;
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < a.length; i++) {
+    cov += (a[i] - meanA) * (b[i] - meanB);
+    varA += (a[i] - meanA) * (a[i] - meanA);
+    varB += (b[i] - meanB) * (b[i] - meanB);
+  }
+  if (varA === 0 || varB === 0) return null; // a flat series has no regime
+  return cov / Math.sqrt(varA * varB);
 }
 
 function round2(n: number): number {

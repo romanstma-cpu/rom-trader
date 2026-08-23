@@ -61,14 +61,30 @@ export function roundTripFeeCentsPerContract(priceCents: number): number {
   return (roundTripFeeUsd(sample, priceCents, priceCents) * 100) / sample;
 }
 
+/** One taker execution in cents per contract — what a maker entry still pays on the way out. */
+export function takerFeeCentsPerContract(priceCents: number): number {
+  const sample = 100;
+  return (takerFeeUsd(sample, priceCents) * 100) / sample;
+}
+
 /**
  * What a take-profit is actually worth after costs, in cents per contract.
  *
  * Zero or less means the trade cannot make money however often it wins, which
  * is worth refusing rather than discovering across a few hundred fills.
+ *
+ * A maker entry (resting limit order) pays no fee to open on Kalshi's general
+ * schedule, so only the taker exit is charged against it.
  */
-export function netEdgeCents(takeProfitCents: number, priceCents: number): number {
-  return takeProfitCents - roundTripFeeCentsPerContract(priceCents);
+export function netEdgeCents(
+  takeProfitCents: number,
+  priceCents: number,
+  makerEntry = false,
+): number {
+  const fee = makerEntry
+    ? takerFeeCentsPerContract(priceCents)
+    : roundTripFeeCentsPerContract(priceCents);
+  return takeProfitCents - fee;
 }
 
 /**
@@ -79,8 +95,11 @@ export function breakEvenWinRate(
   takeProfitCents: number,
   stopLossCents: number,
   priceCents: number,
+  makerEntry = false,
 ): number | null {
-  const fee = roundTripFeeCentsPerContract(priceCents);
+  const fee = makerEntry
+    ? takerFeeCentsPerContract(priceCents)
+    : roundTripFeeCentsPerContract(priceCents);
   const win = takeProfitCents - fee;
   const loss = stopLossCents + fee;
   if (win <= 0) return null; // no number of wins can pay for the fees

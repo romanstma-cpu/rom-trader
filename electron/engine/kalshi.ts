@@ -178,4 +178,63 @@ export class KalshiClient {
     }
     return this.request("POST", "/portfolio/orders", { auth: true, body });
   }
+
+  /**
+   * Auth: rest a YES buy at a limit price and return the order id.
+   *
+   * post_only makes Kalshi reject the order outright if it would cross the
+   * book: the entire point of a maker entry is not paying the taker fee, and
+   * an order that fills instantly at the ask has quietly become the thing it
+   * was meant to avoid.
+   */
+  async placeLimitBuy(ticker: string, count: number, yesPriceCents: number): Promise<string> {
+    const data = await this.request<{ order?: { order_id?: string } }>(
+      "POST",
+      "/portfolio/orders",
+      {
+        auth: true,
+        body: {
+          ticker,
+          client_order_id: crypto.randomUUID(),
+          side: "yes",
+          action: "buy",
+          count,
+          type: "limit",
+          yes_price: yesPriceCents,
+          post_only: true,
+        },
+      },
+    );
+    const id = data.order?.order_id;
+    if (!id) throw new Error("Kalshi accepted the order but returned no order id.");
+    return id;
+  }
+
+  /**
+   * Auth: how a resting order is doing. Parsed defensively — the count fields
+   * have shifted names across API revisions, and a fill mistaken for a
+   * cancellation would strand a real position untracked.
+   */
+  async getOrder(orderId: string): Promise<{ status: string; filledCount: number }> {
+    const data = await this.request<{
+      order?: {
+        status?: string;
+        initial_count?: number;
+        remaining_count?: number;
+        count?: number;
+        fill_count?: number;
+      };
+    }>("GET", `/portfolio/orders/${orderId}`, { auth: true });
+    const o = data.order ?? {};
+    const status = o.status ?? "unknown";
+    const initial = o.initial_count ?? o.count ?? 0;
+    let filled = o.fill_count ?? (o.remaining_count !== undefined ? initial - o.remaining_count : 0);
+    if (status === "executed" && filled <= 0) filled = initial;
+    return { status, filledCount: Math.max(0, filled) };
+  }
+
+  /** Auth: cancel a resting order. Throws if Kalshi refuses (e.g. already filled). */
+  async cancelOrder(orderId: string): Promise<void> {
+    await this.request("DELETE", `/portfolio/orders/${orderId}`, { auth: true });
+  }
 }

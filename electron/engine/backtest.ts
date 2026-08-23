@@ -1,5 +1,6 @@
 import { TradingEngine, memoryStore } from "./engine";
 import type { KalshiMarket } from "./kalshi";
+import { computeMetrics, type PerformanceMetrics } from "./metrics";
 import type { RecordedScan } from "./recorder";
 import { STRATEGIES } from "./strategies";
 import { DEFAULT_SETTINGS, type Settings, type TradeRecord } from "./store";
@@ -29,15 +30,19 @@ export interface BacktestResult {
   haltedReason: string | null;
   equity: { ts: number; equityUsd: number }[];
   exitReasons: Record<string, number>;
+  /** Profit factor, expectancy, per-trade Sharpe/Sortino and the rest. */
+  metrics: PerformanceMetrics;
 }
 
 /** The engine members a replay needs, which are private for live use. */
 interface Drivable {
   status: string;
+  processPendingOrders: (m: KalshiMarket[]) => void;
   updatePositions: (m: KalshiMarket[]) => void;
   scanForEntries: (m: KalshiMarket[], t: number) => void;
   enforceDailyLossLimit: () => void;
   enforceLosingStreak: () => void;
+  enforceMaxDrawdown: () => void;
   equity: () => number;
 }
 
@@ -61,10 +66,14 @@ export function runBacktest(
 
   for (const scan of scans) {
     if (drivable.status !== "running") break; // a brake stopped it
+    // Mirrors the order in tick(); a step left out here passes in replays and
+    // then behaves differently in the running app.
+    drivable.processPendingOrders(scan.markets);
     drivable.updatePositions(scan.markets);
     drivable.scanForEntries(scan.markets, scan.ts);
     drivable.enforceDailyLossLimit();
     drivable.enforceLosingStreak();
+    drivable.enforceMaxDrawdown();
     equity.push({ ts: scan.ts, equityUsd: round2(drivable.equity()) });
   }
 
@@ -112,6 +121,7 @@ function summarise(
     haltedReason,
     equity,
     exitReasons,
+    metrics: computeMetrics(history, equity),
   };
 }
 

@@ -127,6 +127,13 @@ export default function Backtest() {
                 <th>Trades</th>
                 <th>Win rate</th>
                 <th>P&amp;L</th>
+                <th title="Average P&L per closed trade — the sign of this is the whole question.">
+                  Per trade
+                </th>
+                <th title="Gross winnings over gross losses. Above 1 is profitable.">PF</th>
+                <th title="Mean over standard deviation of per-trade P&L. Per trade, not annualised.">
+                  Sharpe
+                </th>
                 <th>Worst drawdown</th>
                 <th>Best / worst trade</th>
               </tr>
@@ -154,6 +161,13 @@ export default function Backtest() {
                     )}
                   </td>
                   <td className={pnlClass(r.pnlUsd)}>{signedMoney(r.pnlUsd)}</td>
+                  <td className={r.metrics.expectancyUsd === null ? "" : pnlClass(r.metrics.expectancyUsd)}>
+                    {r.metrics.expectancyUsd === null ? "—" : signedMoney(r.metrics.expectancyUsd)}
+                  </td>
+                  <td>{r.metrics.profitFactor === null ? "—" : r.metrics.profitFactor.toFixed(2)}</td>
+                  <td>
+                    {r.metrics.sharpePerTrade === null ? "—" : r.metrics.sharpePerTrade.toFixed(2)}
+                  </td>
                   <td>{r.maxDrawdownUsd > 0 ? `−${money(r.maxDrawdownUsd)}` : "—"}</td>
                   <td>
                     <span className="pos">{signedMoney(r.bestUsd)}</span>{" "}

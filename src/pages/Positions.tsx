@@ -13,7 +13,9 @@ export default function Positions({ state }: { state: EngineState | null }) {
     }
   }
 
-  if (state.positions.length === 0) {
+  const pending = state.pendingOrders ?? [];
+
+  if (state.positions.length === 0 && pending.length === 0) {
     return (
       <div className="empty">
         <div className="empty-title">No open positions</div>
@@ -32,52 +34,95 @@ export default function Positions({ state }: { state: EngineState | null }) {
   return (
     <>
       <div className="page-sub">
-        {state.positions.length} open · {money(totalCost)} at cost · {money(totalNow)} at current bid.
+        {state.positions.length} open · {money(totalCost)} at cost · {money(totalNow)} at current bid
+        {pending.length > 0 && <> · {pending.length} resting order{pending.length === 1 ? "" : "s"}</>}.
         Click a ticker to open it on Kalshi.
       </div>
 
-      <div className="card">
-        <table>
-          <thead>
-            <tr>
-              <th>Market</th>
-              <th>Size</th>
-              <th>Entry</th>
-              <th>Bid</th>
-              <th>Peak</th>
-              <th>Unrealized</th>
-              <th>Age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {state.positions.map((p) => {
-              const move = p.currentBidCents - p.entryCents;
-              return (
-                <tr key={p.ticker}>
+      {state.positions.length > 0 && (
+        <div className="card">
+          <table>
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Size</th>
+                <th>Entry</th>
+                <th>Bid</th>
+                <th>Peak</th>
+                <th>Unrealized</th>
+                <th>Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.positions.map((p) => {
+                const move = p.currentBidCents - p.entryCents;
+                return (
+                  <tr key={p.ticker}>
+                    <td>
+                      <button className="linkish" onClick={() => open(p.ticker)} title="Open on Kalshi">
+                        {p.ticker} ↗
+                      </button>
+                      <div className="sub">{p.title.slice(0, 70)}</div>
+                    </td>
+                    <td>{p.contracts}x YES</td>
+                    <td>{p.entryCents}c</td>
+                    <td>
+                      {p.currentBidCents}c
+                      <span className={`delta ${pnlClass(move)}`}>
+                        {move > 0 ? "+" : ""}
+                        {move}c
+                      </span>
+                    </td>
+                    <td className="muted">{Math.round(p.peakMidCents)}c</td>
+                    <td className={pnlClass(p.unrealizedUsd)}>{signedMoney(p.unrealizedUsd)}</td>
+                    <td className="muted">{timeAgo(p.openedAt)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {pending.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <div className="label">Resting orders</div>
+            <span className="hint">Waiting at the bid — cash reserved, no fee paid yet</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Market</th>
+                <th>Size</th>
+                <th>Limit</th>
+                <th>Reserved</th>
+                <th>Expires in</th>
+                <th>Placed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pending.map((o) => (
+                <tr key={o.ticker}>
                   <td>
-                    <button className="linkish" onClick={() => open(p.ticker)} title="Open on Kalshi">
-                      {p.ticker} ↗
+                    <button className="linkish" onClick={() => open(o.ticker)} title="Open on Kalshi">
+                      {o.ticker} ↗
                     </button>
-                    <div className="sub">{p.title.slice(0, 70)}</div>
+                    <div className="sub">{o.title.slice(0, 70)}</div>
                   </td>
-                  <td>{p.contracts}x YES</td>
-                  <td>{p.entryCents}c</td>
-                  <td>
-                    {p.currentBidCents}c
-                    <span className={`delta ${pnlClass(move)}`}>
-                      {move > 0 ? "+" : ""}
-                      {move}c
-                    </span>
+                  <td>{o.contracts}x YES</td>
+                  <td>{o.limitCents}c</td>
+                  <td>{money(o.costUsd)}</td>
+                  <td className="muted">
+                    {o.ticksLeft} scan{o.ticksLeft === 1 ? "" : "s"}
                   </td>
-                  <td className="muted">{Math.round(p.peakMidCents)}c</td>
-                  <td className={pnlClass(p.unrealizedUsd)}>{signedMoney(p.unrealizedUsd)}</td>
-                  <td className="muted">{timeAgo(p.openedAt)}</td>
+                  <td className="muted">{timeAgo(o.placedAt)}</td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </>
   );
 }

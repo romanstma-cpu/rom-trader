@@ -26,6 +26,11 @@ export interface Strategy {
     | "reentryCooldownSeconds"
     | "maxConsecutiveLosses"
     | "trailingStopCents"
+    | "makerEntries"
+    | "makerTtlTicks"
+    | "minNetEdgeCents"
+    | "regimeFilterEnabled"
+    | "maxDrawdownPct"
   >;
 }
 
@@ -61,6 +66,11 @@ export const STRATEGIES: Strategy[] = [
       // Few trades, so a run of losses is a real signal rather than noise.
       maxConsecutiveLosses: 3,
       trailingStopCents: 0,
+      makerEntries: false,
+      makerTtlTicks: 4,
+      minNetEdgeCents: 3,
+      regimeFilterEnabled: false,
+      maxDrawdownPct: 15,
     },
   },
   {
@@ -86,6 +96,11 @@ export const STRATEGIES: Strategy[] = [
       reentryCooldownSeconds: 90,
       maxConsecutiveLosses: 4,
       trailingStopCents: 0,
+      makerEntries: false,
+      makerTtlTicks: 4,
+      minNetEdgeCents: 2,
+      regimeFilterEnabled: false,
+      maxDrawdownPct: 20,
     },
   },
   {
@@ -112,6 +127,47 @@ export const STRATEGIES: Strategy[] = [
       // Many small trades, so short losing runs are ordinary variance.
       maxConsecutiveLosses: 6,
       trailingStopCents: 0,
+      makerEntries: false,
+      makerTtlTicks: 4,
+      minNetEdgeCents: 2,
+      regimeFilterEnabled: false,
+      maxDrawdownPct: 25,
+    },
+  },
+  {
+    id: "patient",
+    name: "Patient",
+    tagline: "Rests at the bid. Pays no entry fee, waits for its price.",
+    detail:
+      "Enters with a resting limit order at the bid instead of crossing the spread — the one " +
+      "change the simulations found that alters the sign of the cost, not just its size. No " +
+      "taker fee on entry, no spread paid on entry; the price is that many orders expire " +
+      "unfilled, and the fills that do arrive come when the price dips back. Skips markets " +
+      "whose recent moves have been reversing rather than trending.",
+    risk: "medium",
+    params: {
+      tradeSizeUsd: 8,
+      maxPositions: 4,
+      momentumThresholdCents: 4,
+      takeProfitCents: 12,
+      stopLossCents: 12,
+      tickSeconds: 15,
+      // The spread is not paid on entry, so a wider book is tolerable here —
+      // it only affects how far the take-profit is, not the cost of getting in.
+      maxSpreadCents: 3,
+      minPriceCents: 10,
+      maxPriceCents: 85,
+      dailyLossLimitUsd: 25,
+      reentryCooldownSeconds: 120,
+      maxConsecutiveLosses: 4,
+      trailingStopCents: 0,
+      makerEntries: true,
+      // Six scans at 15s: ninety seconds for someone to sell into the bid
+      // before the momentum that justified the order has gone stale.
+      makerTtlTicks: 6,
+      minNetEdgeCents: 3,
+      regimeFilterEnabled: true,
+      maxDrawdownPct: 15,
     },
   },
 ];

@@ -102,6 +102,8 @@ interface Score {
   pnl: number;
   trades: number;
   winRate: number | null;
+  /** Gross winnings over gross losses, pooled across all seeds. */
+  profitFactor: number | null;
 }
 
 /** Averages a configuration over many independent worlds. */
@@ -115,18 +117,23 @@ function evaluate(
   let trades = 0;
   let wins = 0;
   let losses = 0;
+  let grossWin = 0;
+  let grossLoss = 0;
   for (const seed of seeds) {
     const r = runBacktest(generate({ ...spec, seed }), settings, label);
     pnl += r.pnlUsd;
     trades += r.trades;
     wins += r.wins;
     losses += r.losses;
+    grossWin += r.metrics.grossWinUsd;
+    grossLoss += r.metrics.grossLossUsd;
   }
   return {
     label,
     pnl: round2(pnl / seeds.length),
     trades: Math.round(trades / seeds.length),
     winRate: wins + losses > 0 ? wins / (wins + losses) : null,
+    profitFactor: grossWin > 0 && grossLoss > 0 ? round2(grossWin / grossLoss) : null,
   };
 }
 
@@ -136,12 +143,13 @@ function round2(n: number): number {
 
 function table(rows: Score[], title: string): void {
   console.log(`\n  ${title}`);
-  console.log(`  ${"config".padEnd(34)} ${"trades".padStart(7)} ${"win".padStart(6)} ${"avg P&L".padStart(10)}`);
-  console.log(`  ${"-".repeat(34)} ${"-".repeat(7)} ${"-".repeat(6)} ${"-".repeat(10)}`);
+  console.log(`  ${"config".padEnd(34)} ${"trades".padStart(7)} ${"win".padStart(6)} ${"PF".padStart(6)} ${"avg P&L".padStart(10)}`);
+  console.log(`  ${"-".repeat(34)} ${"-".repeat(7)} ${"-".repeat(6)} ${"-".repeat(6)} ${"-".repeat(10)}`);
   for (const r of rows) {
     const wr = r.winRate === null ? "—" : `${(r.winRate * 100).toFixed(0)}%`;
+    const pf = r.profitFactor === null ? "—" : r.profitFactor.toFixed(2);
     const pnl = `${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}`;
-    console.log(`  ${r.label.padEnd(34)} ${String(r.trades).padStart(7)} ${wr.padStart(6)} ${pnl.padStart(10)}`);
+    console.log(`  ${r.label.padEnd(34)} ${String(r.trades).padStart(7)} ${wr.padStart(6)} ${pf.padStart(6)} ${pnl.padStart(10)}`);
   }
 }
 
@@ -171,12 +179,17 @@ function main(): void {
   // trades and every configuration then scores "the engine stopped early"
   // rather than anything about the rule being tested. Leaving them on made
   // every row look identical, which is what gave the mistake away.
+  //
+  // The edge margin is also zeroed here so the historical tables stay
+  // comparable across versions; it gets its own measurement below.
   const shipped: Settings = {
     ...DEFAULT_SETTINGS,
     liveMode: false,
     maxConsecutiveLosses: 0,
     dailyLossLimitUsd: 0,
     reentryCooldownSeconds: 0,
+    maxDrawdownPct: 0,
+    minNetEdgeCents: 0,
     dryRunCash: 10_000,
   };
   const perRegime: Score[] = [];
@@ -328,8 +341,119 @@ function main(): void {
   }
   table(stopRows, "10. Stop-loss width with the trailing exit off (tp12)");
 
+  // --- 11. The change 1.4.0 said would matter: stop being a taker.
+  //
+  // A maker rests at the bid: no entry fee, no spread paid on entry. The paper
+  // fill model is conservative — the ask must trade down to the limit — so
+  // these numbers carry the adverse selection honestly: the fills a maker
+  // gets are the moments the market moved against the signal.
+  const makerRows: Score[] = [];
+  for (const [regime, ac] of Object.entries(REGIMES)) {
+    const spec = { ...BASE, regime: regime as Regime, autocorrelation: ac };
+    makerRows.push(
+      evaluate(`taker · ${regime}`, { ...shipped }, spec, SEEDS),
+      evaluate(`maker · ${regime}`, { ...shipped, makerEntries: true, makerTtlTicks: 4 }, spec, SEEDS),
+    );
+  }
+  table(makerRows, "11. Taker vs maker entries (tp12 / sl12), across regimes");
+
+  // --- 12. How long to let a resting order wait.
+  //
+  // Short and the order dies before anyone sells into it; long and the
+  // momentum that justified it has gone stale by the time it fills.
+  const ttlRows: Score[] = [];
+  for (const ttl of [2, 4, 8, 16]) {
+    ttlRows.push(
+      evaluate(
+        `maker, ttl ${ttl} scans`,
+        { ...shipped, makerEntries: true, makerTtlTicks: ttl },
+        { ...BASE, regime: "momentum", autocorrelation: REGIMES.momentum },
+        SEEDS,
+      ),
+    );
+  }
+  table(ttlRows, "12. Resting-order lifetime (momentum market)");
+
+  // --- 13. The regime filter, where it should help and where it must not.
+  //
+  // In the mean-reverting world it should refuse most entries; in the
+  // momentum world it should stay out of the way. A filter that costs money
+  // in the regime it was built for would be worse than none.
+  const regimeRows: Score[] = [];
+  for (const [regime, ac] of Object.entries(REGIMES)) {
+    const spec = { ...BASE, regime: regime as Regime, autocorrelation: ac };
+    regimeRows.push(
+      evaluate(`filter off · ${regime}`, { ...shipped }, spec, SEEDS),
+      evaluate(`filter on  · ${regime}`, { ...shipped, regimeFilterEnabled: true }, spec, SEEDS),
+    );
+  }
+  table(regimeRows, "13. Regime filter (tp12 / sl12), across regimes");
+
+  // --- 14. The edge margin: refusing thin trades.
+  //
+  // tp8 clears the ~3.5c fee by ~4.5c near 50c. Margins under that change
+  // nothing — the demonstration that the filter only bites when it should.
+  // A margin above it refuses every trade, and on a strategy with negative
+  // expectancy, "refused everything" is the best row on the table.
+  const edgeRows: Score[] = [];
+  for (const edge of [0, 4, 6]) {
+    edgeRows.push(
+      evaluate(
+        `min net edge ${edge}c`,
+        { ...shipped, takeProfitCents: 8, minNetEdgeCents: edge },
+        { ...BASE, regime: "momentum", autocorrelation: REGIMES.momentum },
+        SEEDS,
+      ),
+    );
+  }
+  // A margin over the mid-price fee confines entries to the cheap ends of the
+  // fee curve (under ~17c, over ~83c). If that row turns positive, this
+  // control decides whether it found something or fooled itself: the same
+  // configuration on a random walk, where there is nothing to find, and where
+  // the synthetic price reflection at 5c and 95c could manufacture a bounce.
+  edgeRows.push(
+    evaluate(
+      `min net edge 6c · random CONTROL`,
+      { ...shipped, takeProfitCents: 8, minNetEdgeCents: 6 },
+      { ...BASE, regime: "random", autocorrelation: 0 },
+      SEEDS,
+    ),
+  );
+  table(edgeRows, "14. Minimum net edge (tp8, momentum) — 8c clears the fee by ~4.5c");
+
+  // --- 15. Everything the research points at, together, vs the shipped taker.
+  //
+  // The filter-off row is there for attribution: table 13 says the regime
+  // filter contributes little on its own, so if "patient maker" wins, the
+  // credit must be traceable to the parts that earned it.
+  const patient = {
+    ...shipped,
+    makerEntries: true,
+    makerTtlTicks: 6,
+    momentumThresholdCents: 4,
+    regimeFilterEnabled: true,
+    minNetEdgeCents: 3,
+  };
+  const combined: Score[] = [];
+  for (const [regime, ac] of Object.entries(REGIMES)) {
+    const spec = { ...BASE, regime: regime as Regime, autocorrelation: ac };
+    combined.push(
+      evaluate(`shipped taker · ${regime}`, { ...shipped }, spec, SEEDS),
+      evaluate(`patient maker · ${regime}`, patient, spec, SEEDS),
+      evaluate(
+        `patient, no filter · ${regime}`,
+        { ...patient, regimeFilterEnabled: false },
+        spec,
+        SEEDS,
+      ),
+    );
+  }
+  table(combined, "15. The Patient preset's rules vs shipped defaults, across regimes");
+
   console.log("\n  Read 4 and 8 first. Anything that looks profitable there is noise,");
-  console.log("  and tells you how much to discount the other tables.\n");
+  console.log("  and tells you how much to discount the other tables.");
+  console.log("  For 11 and 15, the random rows are again the control: a maker in a");
+  console.log("  random walk should lose little (few fees) but also make nothing.\n");
 }
 
 main();

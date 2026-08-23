@@ -48,8 +48,11 @@ import {
   netEdgeCents,
   roundTripFeeCentsPerContract,
   roundTripFeeUsd,
+  takerFeeCentsPerContract,
   takerFeeUsd,
 } from "../electron/engine/fees";
+import { computeMetrics } from "../electron/engine/metrics";
+import { lag1Autocorrelation } from "../electron/engine/engine";
 
 let passed = 0;
 const failures: string[] = [];
@@ -114,9 +117,10 @@ check("disclaimer persists once accepted", loadAppState().disclaimerAccepted ===
 
 section("strategy presets");
 reset();
-check("three presets ship", STRATEGIES.length === 3, `got ${STRATEGIES.length}`);
+check("four presets ship", STRATEGIES.length === 4, `got ${STRATEGIES.length}`);
 check("ids are unique", new Set(STRATEGIES.map((s) => s.id)).size === STRATEGIES.length);
 check("unknown id is not found", findStrategy("nope") === undefined);
+check("exactly one preset is a maker", STRATEGIES.filter((s) => s.params.makerEntries).length === 1);
 
 for (const s of STRATEGIES) {
   // Not "take-profit beats stop", which is the folk rule and is wrong here.
@@ -124,12 +128,13 @@ for (const s of STRATEGIES) {
   // spread: the price must move (tp + spread) to win but only (sl - spread)
   // to lose. A stop tighter than the target is therefore the losing side of a
   // trade before it starts. What actually has to hold is that a win clears
-  // the round-trip fee, and that the stop leaves room beyond the spread.
+  // the fees — priced the way the preset actually enters — and that the stop
+  // leaves room beyond the spread.
   const mid = Math.round((s.params.minPriceCents + s.params.maxPriceCents) / 2);
   check(
-    `${s.name}: take-profit clears the round-trip fee`,
-    netEdgeCents(s.params.takeProfitCents, mid) > 0,
-    `tp ${s.params.takeProfitCents}c vs ${roundTripFeeCentsPerContract(mid).toFixed(1)}c fee at ${mid}c`,
+    `${s.name}: take-profit clears its fees`,
+    netEdgeCents(s.params.takeProfitCents, mid, s.params.makerEntries) > s.params.minNetEdgeCents,
+    `tp ${s.params.takeProfitCents}c at ${mid}c`,
   );
   check(
     `${s.name}: the stop leaves room past the spread`,
@@ -304,19 +309,23 @@ function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
   const e = new TradingEngine({ ...DEFAULT_SETTINGS, ...settings });
   const anyE = e as unknown as {
     status: string;
+    processPendingOrders: (m: Mkt[]) => void;
     updatePositions: (m: Mkt[]) => void;
     scanForEntries: (m: Mkt[], t: number) => void;
     enforceDailyLossLimit: () => void;
     enforceLosingStreak: () => void;
+    enforceMaxDrawdown: () => void;
   };
   anyE.status = "running";
   for (const book of books) {
+    // Mirrors the order in tick(); a step left out here passes in tests and
+    // then does nothing (or something different) in the running app.
+    anyE.processPendingOrders(book);
     anyE.updatePositions(book);
     anyE.scanForEntries(book, Date.now());
-    // Mirrors the order in tick(); a brake left out here passes in tests and
-    // then does nothing in the running app.
     anyE.enforceDailyLossLimit();
     anyE.enforceLosingStreak();
+    anyE.enforceMaxDrawdown();
   }
   return e;
 }
@@ -345,8 +354,10 @@ const manyUp = ["KXD", "KXE", "KXF"].map((t) => mkt(t, 45, 46));
 e = runEngine({ maxPositions: 2 }, [many, many, many, many, manyUp]);
 check("position cap is respected", e.getState().positions.length === 2, `got ${e.getState().positions.length}`);
 
-// take-profit closes the trade and the cooldown stops it re-buying at the ask
-e = runEngine({ takeProfitCents: 4, reentryCooldownSeconds: 90 }, [flat, flat, flat, flat, jump, [mkt("KXA", 52, 53)]]);
+// take-profit closes the trade and the cooldown stops it re-buying at the ask.
+// A 4c target is under the default edge margin, so the margin is switched off
+// here — these tests are about the exit, not the entry filter.
+e = runEngine({ takeProfitCents: 4, minNetEdgeCents: 0, reentryCooldownSeconds: 90 }, [flat, flat, flat, flat, jump, [mkt("KXA", 52, 53)]]);
 check("take-profit closes the position", e.getState().positions.length === 0);
 check("take-profit is recorded to history", loadHistory().some((t) => t.reason === "take-profit"));
 check("cooldown prevents same-tick re-entry", loadHistory().length === 1, `${loadHistory().length} trades`);
@@ -358,7 +369,7 @@ check("scanner counts the cooldown skip", (e.getState().scanner?.skippedCooldown
 
 // with the cooldown off, the old churn behaviour is still available
 clearHistory();
-e = runEngine({ takeProfitCents: 4, reentryCooldownSeconds: 0 }, [flat, flat, flat, flat, jump, [mkt("KXA", 52, 53)]]);
+e = runEngine({ takeProfitCents: 4, minNetEdgeCents: 0, reentryCooldownSeconds: 0 }, [flat, flat, flat, flat, jump, [mkt("KXA", 52, 53)]]);
 check("cooldown 0 allows immediate re-entry", e.getState().positions.length === 1);
 
 // stop-loss closes the trade
@@ -635,6 +646,268 @@ reset();
     e.getSignals().some((s) => s.reason.includes("round-trip fee")),
     e.getSignals()[0]?.reason ?? "no signals",
   );
+}
+
+section("maker economics");
+{
+  // One taker execution at the 50c peak is half the round trip.
+  check(
+    "one side costs half the round trip",
+    Math.abs(takerFeeCentsPerContract(50) * 2 - roundTripFeeCentsPerContract(50)) < 0.01,
+  );
+  check(
+    "a maker entry keeps more of the same take-profit",
+    netEdgeCents(6, 50, true) > netEdgeCents(6, 50, false),
+  );
+  // 6c minus ~1.75c one-sided vs 6c minus ~3.5c round trip.
+  check("maker net edge is tp minus one fee", Math.abs(netEdgeCents(6, 50, true) - 4.25) < 0.1, `${netEdgeCents(6, 50, true)}`);
+  check(
+    "maker break-even win rate is lower",
+    (breakEvenWinRate(12, 12, 50, true) ?? 1) < (breakEvenWinRate(12, 12, 50, false) ?? 0),
+  );
+  check(
+    "a 3c target a taker cannot win, a maker can",
+    netEdgeCents(3, 50, false) < 0 && netEdgeCents(3, 50, true) > 0,
+  );
+}
+
+section("edge margin");
+reset();
+{
+  // tp6 at ~49c clears the ~3.5c fee by ~2.5c. A 3c margin must refuse it;
+  // the old bare "must clear at all" rule (margin 0) must still allow it.
+  const flatE = [mkt("KXEDGE", 48, 49)];
+  const upE = [mkt("KXEDGE", 53, 54)];
+  let e = runEngine({ takeProfitCents: 6, minNetEdgeCents: 3 }, [flatE, flatE, flatE, flatE, upE]);
+  check("a thin edge under the margin is refused", e.getState().positions.length === 0);
+  check("the refusal is counted as a fee skip", (e.getState().scanner?.skippedFees ?? 0) > 0);
+  check(
+    "the signal names the margin",
+    e.getSignals().some((s) => s.reason.includes("by under")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  e = runEngine({ takeProfitCents: 6, minNetEdgeCents: 0 }, [flatE, flatE, flatE, flatE, upE]);
+  check("margin 0 keeps the old behaviour", e.getState().positions.length === 1);
+}
+
+section("maker order lifecycle");
+reset();
+{
+  const flatM = [mkt("KXM", 40, 41)];
+  const jumpM = [mkt("KXM", 45, 46)]; // rests a buy at the 45c bid
+  const noFill = [mkt("KXM", 45, 46)]; // ask stays above the limit
+  const fill = [mkt("KXM", 44, 45)]; // ask trades down to the limit
+
+  // Placement: an eligible signal rests an order instead of crossing.
+  let e = runEngine({ makerEntries: true, makerTtlTicks: 6 }, [flatM, flatM, flatM, flatM, jumpM]);
+  let st = e.getState();
+  check("an eligible signal rests an order, not a position", st.positions.length === 0 && st.pendingOrders.length === 1);
+  check("the order rests at the bid", st.pendingOrders[0].limitCents === 45);
+  check("cash is reserved for the order", st.cashUsd < DEFAULT_SETTINGS.dryRunCash);
+  check(
+    "equity is unchanged by reserving",
+    Math.abs(st.equityUsd - DEFAULT_SETTINGS.dryRunCash) < 0.01,
+    `${st.equityUsd}`,
+  );
+  check("a resting order raises no opened event yet", loadHistory().length === 0);
+
+  // The bid being touched is not a fill; the ask has to trade down through it.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 6 }, [flatM, flatM, flatM, flatM, jumpM, noFill]);
+  check("a touched bid alone does not fill", e.getState().positions.length === 0 && e.getState().pendingOrders.length === 1);
+
+  // Fill: someone sells into the bid.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 6 }, [flatM, flatM, flatM, flatM, jumpM, fill]);
+  st = e.getState();
+  check("the ask reaching the limit fills the order", st.positions.length === 1 && st.pendingOrders.length === 0);
+  check("the fill is at the limit price", st.positions[0].entryCents === 45);
+  check("a maker fill pays no entry fee", st.positions[0].entryFeeUsd === 0);
+
+  // A taker at the same moment is instantly down the spread and two fees; the
+  // maker fill at the bid should be down only the coming exit fee.
+  const takerAtSame = runEngine({ makerEntries: false }, [flatM, flatM, flatM, flatM, jumpM]);
+  check(
+    "a fresh maker fill is less underwater than a fresh taker entry",
+    st.positions[0].unrealizedUsd > takerAtSame.getState().positions[0].unrealizedUsd,
+    `maker ${st.positions[0].unrealizedUsd} vs taker ${takerAtSame.getState().positions[0].unrealizedUsd}`,
+  );
+
+  // Expiry: momentum decays before the TTL runs out, so nothing re-places.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 4 }, [
+    flatM, flatM, flatM, flatM, jumpM, noFill, noFill, noFill, noFill,
+  ]);
+  st = e.getState();
+  check("an unfilled order expires", st.pendingOrders.length === 0 && st.positions.length === 0);
+  check(
+    "expiry returns the reserved cash to the cent",
+    st.cashUsd === DEFAULT_SETTINGS.dryRunCash,
+    `${st.cashUsd}`,
+  );
+
+  // Resting orders occupy position slots — they are committed cash.
+  const two = ["KXM1", "KXM2"].map((t) => mkt(t, 40, 41));
+  const twoUp = ["KXM1", "KXM2"].map((t) => mkt(t, 45, 46));
+  e = runEngine({ makerEntries: true, maxPositions: 1 }, [two, two, two, two, twoUp]);
+  check("resting orders count toward the position cap", e.getState().pendingOrders.length === 1);
+
+  // And a ticker with an order resting must not get a second one.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 8 }, [flatM, flatM, flatM, flatM, jumpM, [mkt("KXM", 46, 47)]]);
+  check("no second order on the same ticker", e.getState().pendingOrders.length === 1);
+
+  // Stopping the engine hands reserved cash back.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 8 }, [flatM, flatM, flatM, flatM, jumpM]);
+  e.stop();
+  check("stop() cancels resting orders and refunds", e.getState().cashUsd === DEFAULT_SETTINGS.dryRunCash);
+
+  // Flatten cancels them too — "close everything" includes commitments.
+  e = runEngine({ makerEntries: true, makerTtlTicks: 8 }, [flatM, flatM, flatM, flatM, jumpM]);
+  e.flatten();
+  check("flatten cancels resting orders", e.getState().pendingOrders.length === 0);
+
+  // A maker in a runaway market never fills: the ask never comes back down.
+  clearHistory();
+  const ladder: { ts: number; markets: Mkt[] }[] = [];
+  [40, 40, 40, 40, 45, 46, 47, 48, 50, 52].forEach((p, i) => {
+    ladder.push({ ts: Date.now() + i * 15000, markets: [mkt("KXL", p, p + 1)] });
+  });
+  const makerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS, makerEntries: true }, "maker");
+  const takerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS }, "taker");
+  check("a runaway market fills the taker, not the maker", takerRun.trades > 0 && makerRun.trades === 0);
+  check("the unfilled maker run ends flat, not negative", makerRun.pnlUsd === 0);
+}
+
+section("regime filter");
+reset();
+{
+  // Perfectly alternating moves: lag-1 autocorrelation of the changes is -1.
+  const zig = [40, 42, 40, 42, 40, 42, 40, 42, 40];
+  const books = zig.map((p) => [mkt("KXZ", p, p + 1)]);
+  const jumpZ = [mkt("KXZ", 45, 46)]; // clears the momentum trigger
+
+  let e = runEngine({ regimeFilterEnabled: true }, [...books, jumpZ]);
+  check("a chopping market is skipped when the filter is on", e.getState().positions.length === 0);
+  check("the scanner counts the regime skip", (e.getState().scanner?.skippedRegime ?? 0) > 0);
+  check(
+    "the signal explains the regime",
+    e.getSignals().some((s) => s.reason.includes("mean-revert")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  e = runEngine({ regimeFilterEnabled: false }, [...books, jumpZ]);
+  check("the same market trades with the filter off", e.getState().positions.length === 1);
+
+  // The statistic itself.
+  check("alternating changes read as strongly negative", (lag1Autocorrelation(zig) ?? 0) < -0.5);
+  const paired = [40, 41, 42, 44, 46, 47, 48, 50, 52]; // diffs 1,1,2,2,1,1,2,2
+  check("persistent changes read as positive", (lag1Autocorrelation(paired) ?? -1) > 0);
+  check("too little history returns null", lag1Autocorrelation([40, 41, 42]) === null);
+  check("a flat series has no regime", lag1Autocorrelation([40, 40, 40, 40, 40, 40, 40, 40, 40, 40]) === null);
+  check(
+    "a short history does not block entries",
+    // Filter on, but only five samples: the engine must trade rather than
+    // wait forever for statistical significance it may never get.
+    runEngine({ regimeFilterEnabled: true }, [
+      [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)],
+      [mkt("KXS", 45, 46)],
+    ]).getState().positions.length === 1,
+  );
+}
+
+section("drawdown brake");
+reset();
+{
+  const flatD = [mkt("KXD", 50, 51)];
+  const upD = [mkt("KXD", 55, 56)];
+  const crash = [mkt("KXD", 30, 31)];
+
+  // A $50 position falling 26c realises far more than 5% of $100 equity.
+  let e = runEngine({ tradeSizeUsd: 50, maxDrawdownPct: 5, dailyLossLimitUsd: 0 }, [
+    flatD, flatD, flatD, flatD, upD, crash,
+  ]);
+  check("a deep drawdown halts the engine", e.getState().status === "stopped");
+  check(
+    "the halt names the drawdown",
+    (e.getState().haltedReason ?? "").includes("session peak"),
+    e.getState().haltedReason ?? "",
+  );
+
+  e = runEngine({ tradeSizeUsd: 50, maxDrawdownPct: 0, dailyLossLimitUsd: 0, maxConsecutiveLosses: 0 }, [
+    flatD, flatD, flatD, flatD, upD, crash,
+  ]);
+  check("0 disables the drawdown brake", e.getState().status === "running");
+
+  // Sizing scales down as drawdown grows, and never below a quarter.
+  type Sizeable = { sizeFactor: () => number; peakEquityUsd: number; cashUsd: number };
+  const fresh = new TradingEngine({ ...DEFAULT_SETTINGS, maxDrawdownPct: 20 }) as unknown as Sizeable;
+  check("no drawdown, full size", fresh.sizeFactor() === 1);
+  fresh.peakEquityUsd = 100;
+  fresh.cashUsd = 90; // 10% down against a 20% limit
+  const scaled = fresh.sizeFactor();
+  check("halfway to the limit trades smaller", scaled < 1 && scaled > 0.25, `${scaled}`);
+  fresh.cashUsd = 10; // 90% down — beyond the limit
+  check("the floor is a quarter of normal size", fresh.sizeFactor() === 0.25);
+  const off = new TradingEngine({ ...DEFAULT_SETTINGS, maxDrawdownPct: 0 }) as unknown as Sizeable;
+  off.peakEquityUsd = 100;
+  off.cashUsd = 10;
+  check("scaling is off when the brake is off", off.sizeFactor() === 1);
+}
+
+section("performance metrics");
+{
+  const t = (pnlUsd: number): TradeRecord => ({
+    ticker: "KXPM", title: "m", side: "yes", entryCents: 50, exitCents: 50,
+    contracts: 10, pnlUsd, openedAt: 0, closedAt: 0, reason: "test", dryRun: true,
+  });
+  const eq = (vals: number[]) => vals.map((v, i) => ({ ts: i, equityUsd: v }));
+
+  const m = computeMetrics([t(2), t(2), t(-1), t(-1), t(2)], eq([100, 102, 104, 103, 102, 104]));
+  check("profit factor is gross win over gross loss", m.profitFactor === 3, `${m.profitFactor}`);
+  check("expectancy is mean P&L per trade", m.expectancyUsd === 0.8, `${m.expectancyUsd}`);
+  check("win rate counts only decided trades", m.winRate === 0.6);
+  check("payoff ratio is avg win over avg loss", m.payoffRatio === 2, `${m.payoffRatio}`);
+  check("sharpe is mean over spread", Math.abs((m.sharpePerTrade ?? 0) - 0.544) < 0.01, `${m.sharpePerTrade}`);
+  check("sortino only counts downside as risk", (m.sortinoPerTrade ?? 0) > (m.sharpePerTrade ?? 0));
+  check("streaks are tracked", m.longestWinStreak === 2 && m.longestLossStreak === 2);
+  check("drawdown from the equity curve", m.maxDrawdownUsd === 2, `${m.maxDrawdownUsd}`);
+
+  const empty = computeMetrics([], []);
+  check("no trades yields nulls, not zeros pretending to be results",
+    empty.profitFactor === null && empty.expectancyUsd === null && empty.sharpePerTrade === null);
+
+  const allWins = computeMetrics([t(1), t(2)], eq([100, 101, 103]));
+  check("all wins has no profit factor rather than infinity", allWins.profitFactor === null);
+  check("all wins still has an expectancy", allWins.expectancyUsd === 1.5);
+
+  // A losing strategy must read as one on every metric that has a sign.
+  const losing = computeMetrics([t(-1), t(-2), t(1), t(-2)], eq([100, 99, 97, 98, 96]));
+  check("a losing run has negative expectancy", (losing.expectancyUsd ?? 0) < 0);
+  check("a losing run has PF under 1", (losing.profitFactor ?? 9) < 1);
+  check("a losing run has negative sharpe", (losing.sharpePerTrade ?? 0) < 0);
+
+  // And the backtester carries them.
+  const scans: { ts: number; markets: Mkt[] }[] = [];
+  [40, 40, 40, 40, 45, 46, 47, 48, 50, 52].forEach((p, i) => {
+    scans.push({ ts: Date.now() + i * 15000, markets: [mkt("KXMM", p, p + 1)] });
+  });
+  const bt = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "metrics");
+  check("backtests report metrics", bt.metrics.trades === bt.trades);
+}
+
+section("new settings survive sanitising");
+reset();
+{
+  saveSettings({
+    ...DEFAULT_SETTINGS,
+    makerTtlTicks: 0,
+    minNetEdgeCents: -5,
+    maxDrawdownPct: 200,
+    makerEntries: "yes" as never,
+  });
+  const s = loadSettings();
+  check("maker TTL floors at one scan", s.makerTtlTicks === 1, `${s.makerTtlTicks}`);
+  check("edge margin floors at zero", s.minNetEdgeCents === 0, `${s.minNetEdgeCents}`);
+  check("drawdown limit is capped", s.maxDrawdownPct === 95, `${s.maxDrawdownPct}`);
+  check("maker flag coerces to boolean", s.makerEntries === true);
 }
 
 // ---------------------------------------------------------------- backtest

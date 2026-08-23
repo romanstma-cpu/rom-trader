@@ -109,3 +109,97 @@ that exceeds the edge — because those show up regardless of the data. They
 cannot tell you what real Kalshi markets do. Recording real sweeps and
 replaying them on the Backtest page is what does that, and 1.4.0 records every
 sweep for exactly this reason.
+
+---
+
+# 1.5.0: the recommendations, built and measured
+
+1.4.0 ended with four recommendations. 1.5.0 implements them and reports what
+the same ten-seed, three-regime harness measured. The engine also now computes
+real performance metrics — profit factor, expectancy, per-trade Sharpe and
+Sortino, streaks, drawdown percent — on every backtest, because "made $3"
+hides whether that was forty coin flips or four clean trades.
+
+## Maker entries: measured, and humbler than hoped
+
+The prediction was that resting at the bid — no entry fee, no spread paid —
+was "the only change that alters the sign rather than the size." Built, with a
+deliberately conservative fill model: a resting buy at L fills only when the
+ask trades down to L, because queue position at Kalshi is unknowable from here
+and an optimistic fill model is how a backtest lies.
+
+| regime | taker avg P&L | maker avg P&L | taker PF | maker PF |
+|---|---|---|---|---|
+| random | −$36.13 | −$30.25 | 0.41 | 0.47 |
+| momentum | −$35.09 | −$33.17 | 0.65 | 0.63 |
+| revert | −$24.03 | −$18.36 | 0.36 | 0.43 |
+
+**The sign did not flip.** The fee and spread savings are real — roughly 5.5c
+per round trip down to 1.75c — but the conservative fill model shows where
+most of it goes: **adverse selection**. A resting bid fills precisely when the
+market trades down through it, which is the moment the momentum that justified
+the order is being contradicted. The maker buys the dips of its own signal.
+
+The full "Patient" combination (maker entries, 4c trigger, 3c edge margin,
+regime filter, 6-scan TTL) cuts the bleed roughly in half across every regime
+— −$18 / −$23 / −$8 against −$36 / −$35 / −$24 — without turning any of them
+positive. Trading less and paying less per trade, which is improvement of
+size, not of sign.
+
+## The first positive row this project ever produced, and why it does not count
+
+Table 14 raises the minimum-net-edge margin past the mid-price fee, which
+confines entries to the cheap ends of the fee curve (under ~17c, over ~83c):
+
+| config (tp8, momentum) | trades | win | PF | avg P&L |
+|---|---|---|---|---|
+| min net edge 0c | 78 | 49% | 0.47 | −$69.42 |
+| min net edge 6c | 26 | 52% | **1.58** | **+$17.57** |
+| min net edge 6c · **random control** | 10 | 57% | **1.50** | **+$5.21** |
+
+The third row is the verdict. A random walk cannot be beaten; a configuration
+that profits there is exploiting the simulator, not the market. The suspect is
+identified: the synthetic price reflects off its 5c/95c boundaries so prices
+do not pile up and go quiet, and reflection is deterministic mean-reversion
+exactly where this filter trades. Buying near the floor with a wall that
+bounces prices upward is a rigged game the real market does not offer.
+
+So the one profitable configuration found in two versions of this research is
+an artifact, caught by the control built to catch it. It is left in the output
+as a worked example of why table 4 and 8 are read first.
+
+## The regime filter: small, and only in combination
+
+Skipping markets whose recent moves have negative lag-1 autocorrelation did
+almost nothing on its own (table 13 — within noise everywhere, slightly worse
+in the regime it was built for). Inside the Patient configuration it earns a
+modest keep, mostly in the mean-reverting world (−$7.66 with it, −$19.47
+without), and mostly by trading less there: 6 entries instead of 19. It ships
+**off by default**; it is on in the Patient preset because refusing trades in
+a hostile regime is the one thing it demonstrably does.
+
+## Risk controls added
+
+- **Drawdown brake**: the engine halts once session equity falls a set percent
+  below its session peak (default 20%), and trade size scales linearly down to
+  a quarter as drawdown approaches the line. Kelly sizing was considered and
+  rejected: it needs a trusted edge estimate, estimating one from a rolling
+  handful of trades produces size swings that are noise wearing a suit, and
+  with no demonstrated positive edge Kelly's honest answer is zero — which is
+  what the halt line is for.
+- **Edge margin** (`minNetEdgeCents`, default 2c): entries must clear the fees
+  by a real margin, not by half a cent.
+- The parameter sweep gained the maker/taker axis, and every backtest now
+  reports profit factor, expectancy and per-trade Sharpe alongside P&L.
+
+## The honest conclusion, updated
+
+Every recommendation from 1.4.0 is now implemented and measured. Together they
+roughly halve the losses in every synthetic regime. **None of them makes any
+regime profitable**, and the one row that claimed to was disqualified by its
+own control. The app's disclaimer stands unchanged: this is a momentum
+heuristic on a public order book, with no demonstrated forward edge. What
+changed in 1.5.0 is that the bot loses slower, refuses more bad trades,
+measures itself honestly, and can now be tested as a maker against real
+recorded Kalshi data — which is the experiment that actually matters, and the
+one these synthetic worlds cannot run.

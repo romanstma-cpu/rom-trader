@@ -45,15 +45,22 @@ export interface SweepReport {
 }
 
 function label(s: Settings): string {
-  return `tp${s.takeProfitCents} sl${s.stopLossCents} mom${s.momentumThresholdCents} spr${s.maxSpreadCents}`;
+  return (
+    `tp${s.takeProfitCents} sl${s.stopLossCents} mom${s.momentumThresholdCents} ` +
+    `spr${s.maxSpreadCents}${s.makerEntries ? " maker" : ""}`
+  );
 }
 
 /**
  * The grid.
  *
- * Deliberately coarse. A fine grid over four axes finds a winner by chance:
+ * Deliberately coarse. A fine grid over five axes finds a winner by chance:
  * with enough combinations something always looks good on any given stretch of
  * market, and the more candidates the search tries the less the winner means.
+ *
+ * The maker/taker axis earns its place because it is not a tuning knob — it
+ * changes which costs exist at all, which the simulations showed matters more
+ * than every threshold combined.
  */
 function grid(base: Settings): Settings[] {
   const out: Settings[] = [];
@@ -61,14 +68,17 @@ function grid(base: Settings): Settings[] {
     for (const stopLossCents of [3, 5, 8]) {
       for (const momentumThresholdCents of [3, 5, 8]) {
         for (const maxSpreadCents of [1, 2]) {
-          out.push({
-            ...base,
-            takeProfitCents,
-            stopLossCents,
-            momentumThresholdCents,
-            maxSpreadCents,
-            liveMode: false,
-          });
+          for (const makerEntries of [false, true]) {
+            out.push({
+              ...base,
+              takeProfitCents,
+              stopLossCents,
+              momentumThresholdCents,
+              maxSpreadCents,
+              makerEntries,
+              liveMode: false,
+            });
+          }
         }
       }
     }

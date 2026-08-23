@@ -7,6 +7,8 @@ import {
   breakEvenWinRate,
   roundTripFeeCentsPerContract,
   roundTripFeeUsd,
+  takerFeeCentsPerContract,
+  takerFeeUsd,
 } from "../../electron/engine/fees";
 
 export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
@@ -93,15 +95,27 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
   // fee curve peaks and therefore where the numbers are least flattering.
   const refPrice = Math.round((settings.minPriceCents + settings.maxPriceCents) / 2);
   const contracts = Math.max(1, Math.floor((settings.tradeSizeUsd * 100) / refPrice));
-  const feeUsd = roundTripFeeUsd(contracts, refPrice, refPrice);
-  const feeCents = roundTripFeeCentsPerContract(refPrice);
+  // A maker entry pays nothing to open; only the taker exit remains. Every
+  // number below prices the trade the way the engine will actually do it.
+  const maker = settings.makerEntries;
+  const feeUsd = maker
+    ? takerFeeUsd(contracts, refPrice)
+    : roundTripFeeUsd(contracts, refPrice, refPrice);
+  const feeCents = maker
+    ? takerFeeCentsPerContract(refPrice)
+    : roundTripFeeCentsPerContract(refPrice);
 
   // The old figure assumed $1 contracts and ignored fees, so it understated a
   // stop-out by more than half at mid prices.
   const riskPerTrade = (contracts * settings.stopLossCents) / 100 + feeUsd;
   const rewardPerTrade = (contracts * settings.takeProfitCents) / 100 - feeUsd;
   const maxExposure = settings.tradeSizeUsd * settings.maxPositions;
-  const breakEven = breakEvenWinRate(settings.takeProfitCents, settings.stopLossCents, refPrice);
+  const breakEven = breakEvenWinRate(
+    settings.takeProfitCents,
+    settings.stopLossCents,
+    refPrice,
+    maker,
+  );
 
   return (
     <>
@@ -154,6 +168,15 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             min={0}
             onChange={(v) => update({ maxConsecutiveLosses: v })}
           />
+          <NumberField
+            label="Max session drawdown"
+            suffix="%"
+            help="The engine halts once equity falls this far below its session peak, and trade size shrinks as it approaches. 0 disables both."
+            value={settings.maxDrawdownPct}
+            min={0}
+            max={95}
+            onChange={(v) => update({ maxDrawdownPct: v })}
+          />
         </div>
         <div className="callout">
           At these settings a stopped-out trade loses about{" "}
@@ -162,9 +185,19 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           have at risk at once is <strong>${maxExposure.toFixed(2)}</strong>.
           <br />
           <br />
-          Around {refPrice}c the round trip costs <strong>{feeCents.toFixed(1)}c per contract</strong>{" "}
-          — about ${feeUsd.toFixed(2)} on a ${settings.tradeSizeUsd} position, paid whether the trade
-          wins or loses.{" "}
+          {maker ? (
+            <>
+              Around {refPrice}c the taker exit costs{" "}
+              <strong>{feeCents.toFixed(1)}c per contract</strong> — about ${feeUsd.toFixed(2)} on a
+              ${settings.tradeSizeUsd} position. The resting entry pays no fee.{" "}
+            </>
+          ) : (
+            <>
+              Around {refPrice}c the round trip costs{" "}
+              <strong>{feeCents.toFixed(1)}c per contract</strong> — about ${feeUsd.toFixed(2)} on a
+              ${settings.tradeSizeUsd} position, paid whether the trade wins or loses.{" "}
+            </>
+          )}
           {breakEven === null ? (
             <strong className="neg">
               Your take-profit does not cover that, so this configuration loses money however often
@@ -226,12 +259,64 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             max={3600}
             onChange={(v) => update({ reentryCooldownSeconds: v })}
           />
+          <NumberField
+            label="Trailing stop"
+            suffix="c"
+            help="Exit once the mid falls this far from its peak since entry. The simulations found tight values close winners before the take-profit can — leave at 0 unless you have measured otherwise."
+            value={settings.trailingStopCents}
+            min={0}
+            max={90}
+            onChange={(v) => update({ trailingStopCents: v })}
+          />
+          <NumberField
+            label="Min net edge"
+            suffix="c"
+            help="Refuse entries whose take-profit clears the fees by less than this. An edge of half a cent is not worth the risk taken to collect it."
+            value={settings.minNetEdgeCents}
+            min={0}
+            max={30}
+            onChange={(v) => update({ minNetEdgeCents: v })}
+          />
         </div>
         {settings.takeProfitCents <= settings.stopLossCents && (
           <div className="notice warn">
             Your take-profit is not larger than your stop, so you need to win well over half your
             trades just to break even before fees.
           </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <div className="label">Order type</div>
+          <span className="hint">How entries reach the book</span>
+        </div>
+        <Toggle
+          label="Enter with resting limit orders (maker)"
+          help="Rest a buy at the bid instead of crossing to the ask. No taker fee and no spread paid on entry — the two costs that dominated every simulation. The trade-off: fills are not guaranteed, and the ones that arrive come when the price dips back to your bid."
+          checked={settings.makerEntries}
+          onChange={(v) => update({ makerEntries: v })}
+        />
+        {settings.makerEntries && (
+          <>
+            <div className="field-grid">
+              <NumberField
+                label="Order lifetime"
+                suffix=" scans"
+                help="How many scans a resting order waits before being cancelled unfilled. Longer catches more fills, but the momentum that justified the order goes stale."
+                value={settings.makerTtlTicks}
+                min={1}
+                max={120}
+                onChange={(v) => update({ makerTtlTicks: v })}
+              />
+            </div>
+            <div className="callout">
+              With a {settings.tickSeconds}s scan, an order rests for about{" "}
+              <strong>{settings.makerTtlTicks * settings.tickSeconds}s</strong> before it is
+              cancelled. Exits still cross the spread — a stop-loss that waits politely at the bid
+              is not a stop-loss.
+            </div>
+          </>
         )}
       </div>
 
@@ -322,6 +407,12 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             onChange={(v) => update({ maxPriceCents: v })}
           />
         </div>
+        <Toggle
+          label="Skip mean-reverting markets (regime filter)"
+          help="Momentum assumes the last move predicts the next one. This checks whether a market's recent moves have actually been continuing, and skips it while they have been reversing instead."
+          checked={settings.regimeFilterEnabled}
+          onChange={(v) => update({ regimeFilterEnabled: v })}
+        />
       </div>
 
       <div className="sticky-save">

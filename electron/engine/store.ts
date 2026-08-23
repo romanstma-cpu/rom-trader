@@ -32,6 +32,34 @@ export interface Settings {
   tradingHoursEnabled: boolean; // confine entries to a window of the local day
   tradingStartHour: number; // 0-23, inclusive
   tradingEndHour: number; // 0-23, exclusive; may wrap past midnight
+  /**
+   * Enter with a resting limit order at the bid instead of crossing to the ask.
+   *
+   * This is the one change the simulations said flips the sign of the result
+   * rather than the size: a maker pays no fee to open and never pays the
+   * spread on entry. The price is that fills are not guaranteed, and the ones
+   * that do arrive come when the price trades down through the bid — see
+   * docs/STRATEGY-FINDINGS.md.
+   */
+  makerEntries: boolean;
+  /** Scans a resting order waits before being cancelled unfilled. */
+  makerTtlTicks: number;
+  /**
+   * Refuse entries whose take-profit clears the fees by less than this many
+   * cents. Zero keeps only the old "must clear at all" rule.
+   */
+  minNetEdgeCents: number;
+  /**
+   * Skip markets whose recent moves have been mean-reverting (negative lag-1
+   * autocorrelation). A momentum rule in a chopping market is buying every
+   * head-fake at the top of it.
+   */
+  regimeFilterEnabled: boolean;
+  /**
+   * Halt once session equity falls this far below its session peak, in
+   * percent. Trade size also scales down as drawdown approaches it. 0 disables.
+   */
+  maxDrawdownPct: number;
 }
 
 export interface AppState {
@@ -93,6 +121,11 @@ export const DEFAULT_SETTINGS: Settings = {
   tradingHoursEnabled: false,
   tradingStartHour: 9,
   tradingEndHour: 21,
+  makerEntries: false,
+  makerTtlTicks: 4,
+  minNetEdgeCents: 2,
+  regimeFilterEnabled: false,
+  maxDrawdownPct: 20,
 };
 
 export const DEFAULT_APP_STATE: AppState = {
@@ -178,6 +211,11 @@ function sanitize(s: Settings): Settings {
     tradingHoursEnabled: Boolean(s.tradingHoursEnabled),
     tradingStartHour: Math.round(num(s.tradingStartHour, 0, 23, 9)),
     tradingEndHour: Math.round(num(s.tradingEndHour, 0, 23, 21)),
+    makerEntries: Boolean(s.makerEntries),
+    makerTtlTicks: Math.round(num(s.makerTtlTicks, 1, 120, DEFAULT_SETTINGS.makerTtlTicks)),
+    minNetEdgeCents: num(s.minNetEdgeCents, 0, 30, DEFAULT_SETTINGS.minNetEdgeCents),
+    regimeFilterEnabled: Boolean(s.regimeFilterEnabled),
+    maxDrawdownPct: num(s.maxDrawdownPct, 0, 95, DEFAULT_SETTINGS.maxDrawdownPct),
   };
 }
 
