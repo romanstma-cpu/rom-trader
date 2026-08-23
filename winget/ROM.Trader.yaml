@@ -1,0 +1,10 @@
+# Version manifest. Submit alongside the installer and locale files by copying
+# all three into microsoft/winget-pkgs under
+#   manifests/r/ROM/Trader/1.1.2/
+# and opening a pull request. Validate first with:
+#   winget validate --manifest winget/
+PackageIdentifier: ROM.Trader
+PackageVersion: 1.1.2
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

@@ -1,0 +1,23 @@
+PackageIdentifier: ROM.Trader
+PackageVersion: 1.1.2
+MinimumOSVersion: 10.0.0.0
+InstallerType: nullsoft
+# electron-builder is configured perMachine:false, so this installs into the
+# user profile and needs no elevation.
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+InstallerSwitches:
+  Silent: /S
+  SilentWithProgress: /S
+UpgradeBehavior: install
+ReleaseDate: 2026-08-23
+Installers:
+  - Architecture: x64
+    # Version-pinned on purpose: a /latest/ URL would break the hash the moment
+    # a new release is published.
+    InstallerUrl: https://github.com/romanstma-cpu/rom-apps/releases/download/v1.1.2/ROM-Trader-Setup.exe
+    InstallerSha256: E05903817F0B1A7B95A20E64B03945AF7FD65E98DDA7D3533DCBC904F9D758F8
+ManifestType: installer
+ManifestVersion: 1.6.0

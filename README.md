@@ -62,6 +62,12 @@ npm run dist
 Output lands in `release/`. The installer is unsigned, so SmartScreen will warn
 about an unknown publisher on first launch.
 
+`winget/` holds validated manifests for the Windows Package Manager. To publish
+a version, refresh `PackageVersion`, `InstallerUrl` and `InstallerSha256`, then
+copy the three files into `manifests/r/ROM/Trader/<version>/` in a fork of
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) and open a
+pull request. Check them first with `winget validate --manifest winget`.
+
 ## Layout
 
 ```
@@ -86,4 +92,4 @@ Settings, history, saved setups and logs live in
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).

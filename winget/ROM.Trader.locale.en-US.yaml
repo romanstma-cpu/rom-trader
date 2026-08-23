@@ -1,0 +1,35 @@
+PackageIdentifier: ROM.Trader
+PackageVersion: 1.1.2
+PackageLocale: en-US
+Publisher: ROM
+PublisherUrl: https://romapps.xyz
+PublisherSupportUrl: https://github.com/romanstma-cpu/rom-trader/issues
+PackageName: ROM Trader
+PackageUrl: https://romapps.xyz
+License: MIT
+LicenseUrl: https://github.com/romanstma-cpu/rom-trader/blob/main/LICENSE
+ShortDescription: An automated momentum bot for Kalshi prediction markets.
+Description: |-
+  ROM Trader scans liquid Kalshi prediction markets and trades short-term price
+  momentum, with take-profit, stop-loss and reversal exits.
+
+  It ships in dry-run: it paper-trades against live prices and places no orders
+  until you add your own Kalshi API key and switch live mode on yourself. A
+  signals feed shows every market the last sweep looked at and why each one did
+  or did not qualify, and a daily loss limit halts the engine on its own.
+
+  Your API key is encrypted with your Windows account and never leaves the PC.
+
+  This is a momentum heuristic, not a proven edge. It has no demonstrated
+  profitability, fees and spread work against it, and nothing it produces is
+  financial advice.
+Moniker: rom-trader
+Tags:
+  - kalshi
+  - trading
+  - trading-bot
+  - prediction-markets
+  - automation
+ReleaseNotesUrl: https://github.com/romanstma-cpu/rom-apps/releases/tag/v1.1.2
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
