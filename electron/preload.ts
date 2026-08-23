@@ -39,6 +39,12 @@ const api = {
     apply: (name: string) => ipcRenderer.invoke("profiles:apply", name),
     delete: (name: string) => ipcRenderer.invoke("profiles:delete", name),
   },
+  // Write-only by design: there is no getter for the private key.
+  credentials: {
+    status: () => ipcRenderer.invoke("credentials:status"),
+    set: (c: unknown) => ipcRenderer.invoke("credentials:set", c),
+    clear: () => ipcRenderer.invoke("credentials:clear"),
+  },
   kalshi: {
     test: () => ipcRenderer.invoke("kalshi:test"),
     balance: () => ipcRenderer.invoke("kalshi:balance"),

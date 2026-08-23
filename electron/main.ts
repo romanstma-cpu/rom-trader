@@ -4,6 +4,13 @@ import * as path from "node:path";
 import { installCrashHandlers, reportFatal } from "./crashlog";
 import { checkForUpdates, getUpdateState, initUpdater, installUpdate } from "./updater";
 import { TradingEngine } from "./engine/engine";
+import {
+  clearCredentials,
+  credentialStatus,
+  loadCredentials,
+  migrateLegacyCredentials,
+  saveCredentials,
+} from "./engine/credentials";
 import { KalshiClient } from "./engine/kalshi";
 import { STRATEGIES, findStrategy } from "./engine/strategies";
 import {
@@ -31,6 +38,21 @@ installCrashHandlers();
 let win: BrowserWindow | null = null;
 let engine: TradingEngine;
 
+/**
+ * Send to the renderer, or quietly do nothing if it is already gone.
+ *
+ * On quit the BrowserWindow object outlives its webContents, so `win?.` is not
+ * enough: the reference is non-null while the contents underneath are
+ * destroyed, and sending to those throws "Object has been destroyed". That
+ * escapes as an uncaught exception during shutdown and Electron shows its
+ * blank "A JavaScript error occurred in the main process" dialog — which is
+ * what users hit when closing the app with the engine still running.
+ */
+function sendToRenderer(channel: string, payload?: unknown): void {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  win.webContents.send(channel, payload);
+}
+
 function createWindow(): void {
   const appState = loadAppState();
 
@@ -56,7 +78,7 @@ function createWindow(): void {
     else win?.show();
   });
 
-  const relay = () => win?.webContents.send("window:maximizeChange", win?.isMaximized() ?? false);
+  const relay = () => sendToRenderer("window:maximizeChange", win?.isMaximized() ?? false);
   win.on("maximize", relay);
   win.on("unmaximize", relay);
 
@@ -128,13 +150,33 @@ function registerIpc(): void {
   });
   ipcMain.handle("profiles:delete", (_e, name: string) => deleteProfile(name));
 
+  // The private key is deliberately write-only across this boundary: the
+  // renderer can set it or clear it, but never read it back.
+  ipcMain.handle("credentials:status", () => credentialStatus());
+  ipcMain.handle("credentials:set", (_e, c: { apiKeyId: string; apiPrivateKeyPem: string }) => {
+    saveCredentials({
+      apiKeyId: String(c?.apiKeyId ?? ""),
+      apiPrivateKeyPem: String(c?.apiPrivateKeyPem ?? ""),
+    });
+    engine.updateCredentials(loadCredentials());
+    return credentialStatus();
+  });
+  ipcMain.handle("credentials:clear", () => {
+    clearCredentials();
+    // Clearing keys can never leave the engine armed for real orders.
+    saveSettings({ ...loadSettings(), liveMode: false });
+    engine.updateCredentials(loadCredentials());
+    engine.updateSettings(loadSettings());
+    return credentialStatus();
+  });
+
   ipcMain.handle("kalshi:test", async () => {
-    const s = loadSettings();
-    return new KalshiClient(s.apiKeyId, s.apiPrivateKeyPem).testConnection();
+    const c = loadCredentials();
+    return new KalshiClient(c.apiKeyId, c.apiPrivateKeyPem).testConnection();
   });
   ipcMain.handle("kalshi:balance", async () => {
-    const s = loadSettings();
-    const c = new KalshiClient(s.apiKeyId, s.apiPrivateKeyPem);
+    const cred = loadCredentials();
+    const c = new KalshiClient(cred.apiKeyId, cred.apiPrivateKeyPem);
     if (!c.hasAuth) return null;
     try {
       return await c.getBalance();
@@ -154,6 +196,8 @@ function registerIpc(): void {
   ipcMain.handle("app:factoryReset", () => {
     engine.stop();
     factoryReset();
+    clearCredentials(); // drops the in-memory copy too, not just the file
+    engine.updateCredentials(loadCredentials());
     engine.updateSettings(loadSettings());
     return loadSettings();
   });
@@ -196,10 +240,16 @@ if (!app.requestSingleInstanceLock()) {
   app
     .whenReady()
     .then(() => {
-      engine = new TradingEngine(loadSettings());
+      // Must run before anything reads settings: 1.1.1 and earlier kept the
+      // signing key in settings.json as plain text.
+      if (migrateLegacyCredentials()) {
+        console.log("Moved Kalshi credentials into the encrypted store.");
+      }
+
+      engine = new TradingEngine(loadSettings(), loadCredentials());
       engine.subscribe({
-        onState: (s) => win?.webContents.send("engine:state", s),
-        onLog: (l) => win?.webContents.send("engine:log", l),
+        onState: (s) => sendToRenderer("engine:state", s),
+        onLog: (l) => sendToRenderer("engine:log", l),
       });
 
       // Seed one point so a fresh chart has a baseline instead of empty axes.

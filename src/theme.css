@@ -856,6 +856,22 @@ textarea::placeholder {
   outline: 2px solid var(--pink);
   outline-offset: 2px;
 }
+/* A toggle that cannot be moved yet: dim it, but keep the help text readable
+   since that is what explains why. */
+.toggle.locked {
+  cursor: not-allowed;
+}
+.toggle.locked .toggle-track,
+.toggle.locked .toggle-label {
+  opacity: 0.45;
+}
+
+/* Key ids and other things that should not be mistaken for prose. */
+.mono {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
 .toggle-text {
   display: flex;
   flex-direction: column;

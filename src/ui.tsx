@@ -185,16 +185,23 @@ export function Toggle({
   checked,
   onChange,
   danger,
+  disabled,
 }: {
   label: string;
   help?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   danger?: boolean;
+  disabled?: boolean;
 }) {
   return (
-    <label className={`toggle ${danger && checked ? "hot" : ""}`}>
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    <label className={`toggle ${danger && checked ? "hot" : ""} ${disabled ? "locked" : ""}`}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
       <span className="toggle-track" aria-hidden="true">
         <span className="toggle-knob" />
       </span>

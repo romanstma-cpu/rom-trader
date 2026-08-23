@@ -62,9 +62,8 @@ export interface LogLine {
   msg: string;
 }
 
+/** Secrets are not in here — see CredentialStatus. */
 export interface Settings {
-  apiKeyId: string;
-  apiPrivateKeyPem: string;
   liveMode: boolean;
   dryRunCash: number;
   tradeSizeUsd: number;
@@ -80,10 +79,14 @@ export interface Settings {
   reentryCooldownSeconds: number;
 }
 
-export type StrategyParams = Omit<
-  Settings,
-  "apiKeyId" | "apiPrivateKeyPem" | "liveMode" | "dryRunCash"
->;
+export interface CredentialStatus {
+  configured: boolean;
+  keyIdHint: string;
+  encryptionAvailable: boolean;
+  error: string | null;
+}
+
+export type StrategyParams = Omit<Settings, "liveMode" | "dryRunCash">;
 
 export interface Strategy {
   id: string;
@@ -97,7 +100,7 @@ export interface Strategy {
 export interface Profile {
   name: string;
   savedAt: number;
-  params: Omit<Settings, "apiKeyId" | "apiPrivateKeyPem" | "liveMode">;
+  params: Omit<Settings, "liveMode">;
 }
 
 export interface AppSettings {
@@ -191,6 +194,12 @@ export interface RomApi {
     save: (name: string) => Promise<Profile[]>;
     apply: (name: string) => Promise<Settings>;
     delete: (name: string) => Promise<Profile[]>;
+  };
+  /** No getter for the key itself — it only ever travels toward the vault. */
+  credentials: {
+    status: () => Promise<CredentialStatus>;
+    set: (c: { apiKeyId: string; apiPrivateKeyPem: string }) => Promise<CredentialStatus>;
+    clear: () => Promise<CredentialStatus>;
   };
   kalshi: {
     test: () => Promise<TestResult>;

@@ -2,9 +2,12 @@ import { app } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+/**
+ * Everything in here is written to settings.json in the clear, so it must stay
+ * free of secrets. Kalshi credentials live in the encrypted vault instead —
+ * see ./credentials.ts.
+ */
 export interface Settings {
-  apiKeyId: string;
-  apiPrivateKeyPem: string;
   liveMode: boolean;
   dryRunCash: number; // starting paper cash in USD
   tradeSizeUsd: number; // per-trade budget in USD
@@ -29,8 +32,8 @@ export interface AppState {
 export interface Profile {
   name: string;
   savedAt: number;
-  /** Credentials are deliberately excluded so profiles are safe to share. */
-  params: Omit<Settings, "apiKeyId" | "apiPrivateKeyPem" | "liveMode">;
+  /** liveMode is excluded so importing a profile can never arm real orders. */
+  params: Omit<Settings, "liveMode">;
 }
 
 export interface TradeRecord {
@@ -53,8 +56,6 @@ export interface EquityPoint {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  apiKeyId: "",
-  apiPrivateKeyPem: "",
   liveMode: false,
   dryRunCash: 100,
   tradeSizeUsd: 10,
@@ -127,8 +128,13 @@ function writeJson(file: string, value: unknown): void {
 function sanitize(s: Settings): Settings {
   const num = (v: number, min: number, max: number, fallback: number) =>
     Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+  // Belt and braces: a pre-1.1.2 file, or a renderer that still sends them,
+  // must never put credentials back into settings.json.
+  const clean = { ...s } as Settings & Record<string, unknown>;
+  delete clean.apiKeyId;
+  delete clean.apiPrivateKeyPem;
   return {
-    ...s,
+    ...clean,
     dryRunCash: num(s.dryRunCash, 1, 1_000_000, DEFAULT_SETTINGS.dryRunCash),
     tradeSizeUsd: num(s.tradeSizeUsd, 1, 100_000, DEFAULT_SETTINGS.tradeSizeUsd),
     maxPositions: Math.round(num(s.maxPositions, 1, 50, DEFAULT_SETTINGS.maxPositions)),
@@ -182,7 +188,7 @@ export function loadProfiles(): Profile[] {
 export function saveProfile(name: string, s: Settings): Profile[] {
   const trimmed = name.trim();
   if (!trimmed) throw new Error("Give the profile a name first.");
-  const { apiKeyId: _k, apiPrivateKeyPem: _p, liveMode: _l, ...params } = s;
+  const { liveMode: _l, ...params } = s;
   const all = loadProfiles().filter((x) => x.name !== trimmed);
   all.push({ name: trimmed, savedAt: Date.now(), params });
   all.sort((a, b) => a.name.localeCompare(b.name));
@@ -219,6 +225,7 @@ export function factoryReset(): void {
     "profiles.json",
     "equity.json",
     "app-state.json",
+    "credentials.dat",
   ]) {
     try {
       const p = path.join(dataDir(), f);

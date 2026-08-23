@@ -29,6 +29,13 @@ import {
   saveSettings,
   type TradeRecord,
 } from "../electron/engine/store";
+import {
+  clearCredentials,
+  credentialStatus,
+  loadCredentials,
+  migrateLegacyCredentials,
+  saveCredentials,
+} from "../electron/engine/credentials";
 
 let passed = 0;
 const failures: string[] = [];
@@ -49,6 +56,7 @@ function section(title: string): void {
 
 function reset(): void {
   factoryReset();
+  clearCredentials(); // also drops the vault's in-memory cache
 }
 
 // ---------------------------------------------------------------- store
@@ -113,11 +121,94 @@ for (const s of STRATEGIES) {
   })());
 }
 
+// ---------------------------------------------------------------- credentials
+
+section("credential vault");
+reset();
+
+const PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY-----";
+
+check("no key on a fresh install", credentialStatus().configured === false);
+check("missing vault reads as blank, not a crash", loadCredentials().apiKeyId === "");
+
+saveCredentials({ apiKeyId: "abcdef01-2345-6789-abcd-ef0123456789", apiPrivateKeyPem: PEM });
+check("saved key round-trips", loadCredentials().apiPrivateKeyPem === PEM);
+check("status reports configured", credentialStatus().configured === true);
+check(
+  "status hints at the id without printing it",
+  credentialStatus().keyIdHint === "abcdef01…6789",
+  credentialStatus().keyIdHint,
+);
+
+const vaultRaw = fs.readFileSync(path.join(dataDir(), "credentials.dat"), "utf-8");
+check("vault does not contain the PEM in the clear", !vaultRaw.includes("BEGIN RSA"));
+check("vault does not contain the key id in the clear", !vaultRaw.includes("abcdef01-2345"));
+
+// A renderer on an old build could still post credential fields; they must not
+// land in settings.json even so.
+saveSettings({
+  ...DEFAULT_SETTINGS,
+  tradeSizeUsd: 12,
+  apiKeyId: "abcdef01-2345-6789-abcd-ef0123456789",
+  apiPrivateKeyPem: PEM,
+} as never);
+const settingsRaw = fs.readFileSync(path.join(dataDir(), "settings.json"), "utf-8");
+check("settings.json holds no key material", !settingsRaw.includes("BEGIN RSA"));
+check("settings.json holds no key id", !settingsRaw.includes("abcdef01-2345"));
+check("credential fields are dropped, not just blanked", !settingsRaw.includes("apiPrivateKeyPem"));
+check("unrelated settings still save", loadSettings().tradeSizeUsd === 12);
+
+clearCredentials();
+check("clearing removes the key", credentialStatus().configured === false);
+check("clearing deletes the file", !fs.existsSync(path.join(dataDir(), "credentials.dat")));
+
+saveCredentials({ apiKeyId: "  ", apiPrivateKeyPem: "  " });
+check("a blank pair is treated as no key", credentialStatus().configured === false);
+
+// -- migration from 1.1.1, where the key sat in settings.json as plain text
+reset();
+fs.writeFileSync(
+  path.join(dataDir(), "settings.json"),
+  JSON.stringify(
+    { ...DEFAULT_SETTINGS, apiKeyId: "LEGACY-ID", apiPrivateKeyPem: PEM, tradeSizeUsd: 17 },
+    null,
+    2,
+  ),
+  "utf-8",
+);
+check("migration reports that it ran", migrateLegacyCredentials() === true);
+check("migrated key is readable from the vault", loadCredentials().apiKeyId === "LEGACY-ID");
+check("migrated PEM survived intact", loadCredentials().apiPrivateKeyPem === PEM);
+
+const afterMigration = fs.readFileSync(path.join(dataDir(), "settings.json"), "utf-8");
+check("migration strips the key from settings.json", !afterMigration.includes("LEGACY-ID"));
+check("migration strips the PEM from settings.json", !afterMigration.includes("BEGIN RSA"));
+check("migration keeps unrelated settings", loadSettings().tradeSizeUsd === 17);
+check("migration is not repeated once done", migrateLegacyCredentials() === false);
+
+reset();
+check("nothing to migrate on a clean install", migrateLegacyCredentials() === false);
+
+// A half-filled legacy pair is junk, but must still be scrubbed from the file.
+reset();
+fs.writeFileSync(
+  path.join(dataDir(), "settings.json"),
+  JSON.stringify({ ...DEFAULT_SETTINGS, apiKeyId: "ORPHAN-ID", apiPrivateKeyPem: "" }, null, 2),
+  "utf-8",
+);
+migrateLegacyCredentials();
+check("an incomplete legacy pair is not stored", credentialStatus().configured === false);
+check(
+  "an incomplete legacy pair is still scrubbed",
+  !fs.readFileSync(path.join(dataDir(), "settings.json"), "utf-8").includes("ORPHAN-ID"),
+);
+
 // ---------------------------------------------------------------- profiles
 
 section("saved setups");
 reset();
-saveSettings({ ...DEFAULT_SETTINGS, apiKeyId: "SECRET-ID", apiPrivateKeyPem: "SECRET-PEM", liveMode: true, tradeSizeUsd: 33 });
+saveSettings({ ...DEFAULT_SETTINGS, liveMode: true, tradeSizeUsd: 33 });
+saveCredentials({ apiKeyId: "SECRET-ID", apiPrivateKeyPem: "SECRET-PEM" });
 saveProfile("evening", loadSettings());
 const prof = loadProfiles()[0];
 check("profile is saved", prof !== undefined && prof.name === "evening");
@@ -303,16 +394,59 @@ clearHistory();
 e = runEngine({ dailyLossLimitUsd: 0 }, [flat]);
 check("a zero limit disables the halt", e.getState().status === "running");
 
+// ---------------------------------------------------------------- shutdown
+
+/**
+ * Regression for the crash in 1.1.0/1.1.1: closing the app while the engine ran
+ * called engine.stop(), whose log line reached a listener that posted to an
+ * already-destroyed webContents. The throw escaped as an uncaught exception and
+ * Electron showed its blank "A JavaScript error occurred in the main process"
+ * dialog. Main now guards the send; the engine must also survive a listener
+ * that throws, so one bad subscriber cannot take the process down.
+ */
+section("shutdown");
+reset();
+{
+  const bye = [mkt("KXBYE", 40, 41)];
+  const byeUp = [mkt("KXBYE", 45, 46)];
+  // Open a position first, so stop() has real work (and real log lines) to do.
+  const e = runEngine({ momentumThresholdCents: 3 }, [bye, bye, bye, bye, byeUp]);
+  check("shutdown case starts with a position open", e.getState().positions.length === 1);
+
+  let stateCalls = 0;
+  e.subscribe({
+    onState: () => {
+      stateCalls++;
+      throw new Error("Object has been destroyed");
+    },
+    onLog: () => {
+      throw new Error("Object has been destroyed");
+    },
+  });
+
+  let threw = false;
+  try {
+    e.stop();
+  } catch {
+    threw = true;
+  }
+  check("stop() survives a listener that throws", !threw);
+  check("the throwing listener was actually reached", stateCalls > 0);
+  check("engine still reaches the stopped state", e.getState().status === "stopped");
+}
+
 // ---------------------------------------------------------------- factory reset
 
 section("factory reset");
 saveSettings({ ...DEFAULT_SETTINGS, tradeSizeUsd: 99 });
 saveProfile("keepme", loadSettings());
+saveCredentials({ apiKeyId: "WIPE-ME", apiPrivateKeyPem: PEM });
 factoryReset();
 check("reset restores default settings", loadSettings().tradeSizeUsd === DEFAULT_SETTINGS.tradeSizeUsd);
 check("reset clears profiles", loadProfiles().length === 0);
 check("reset clears history", loadHistory().length === 0);
 check("reset clears the disclaimer", loadAppState().disclaimerAccepted === false);
+check("reset deletes the credential vault", !fs.existsSync(path.join(dataDir(), "credentials.dat")));
 
 // ---------------------------------------------------------------- result
 

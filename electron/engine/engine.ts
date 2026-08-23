@@ -1,3 +1,4 @@
+import type { Credentials } from "./credentials";
 import { KalshiClient, KalshiMarket } from "./kalshi";
 import {
   Settings,
@@ -111,9 +112,12 @@ export class TradingEngine {
   private static readonly MAX_HISTORY = 20;
   private static readonly MAX_SIGNALS = 60;
 
-  constructor(settings: Settings) {
+  // Credentials are passed in rather than read from settings: they live in an
+  // encrypted vault the engine has no business touching, and injecting them
+  // keeps this class runnable headless in tests.
+  constructor(settings: Settings, credentials: Credentials = { apiKeyId: "", apiPrivateKeyPem: "" }) {
     this.settings = settings;
-    this.client = new KalshiClient(settings.apiKeyId, settings.apiPrivateKeyPem);
+    this.client = new KalshiClient(credentials.apiKeyId, credentials.apiPrivateKeyPem);
     this.cashUsd = settings.dryRunCash;
   }
 
@@ -121,10 +125,15 @@ export class TradingEngine {
     this.listeners.push(l);
   }
 
+  /** Swaps the signing key in place; omit to leave the current one alone. */
+  updateCredentials(c: Credentials): void {
+    this.client = new KalshiClient(c.apiKeyId, c.apiPrivateKeyPem);
+    this.emitState();
+  }
+
   updateSettings(s: Settings): void {
     const tickChanged = s.tickSeconds !== this.settings.tickSeconds;
     this.settings = s;
-    this.client = new KalshiClient(s.apiKeyId, s.apiPrivateKeyPem);
     if (this.status === "stopped") this.cashUsd = s.dryRunCash;
     // A new poll interval has to replace the running timer or it never takes effect.
     if (tickChanged && this.status === "running" && this.timer) {
@@ -513,12 +522,24 @@ export class TradingEngine {
     const line: LogLine = { ts: Date.now(), level, msg };
     this.logs.push(line);
     if (this.logs.length > 500) this.logs.shift();
-    for (const l of this.listeners) l.onLog(line);
+    for (const l of this.listeners) {
+      try {
+        l.onLog(line);
+      } catch {
+        // A dead renderer must not stop the engine from shutting down cleanly.
+      }
+    }
   }
 
   private emitState(): void {
     const s = this.getState();
-    for (const l of this.listeners) l.onState(s);
+    for (const l of this.listeners) {
+      try {
+        l.onState(s);
+      } catch {
+        // as above — notifying is best-effort, never load-bearing
+      }
+    }
   }
 }
 

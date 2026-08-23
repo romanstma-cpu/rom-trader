@@ -42,7 +42,12 @@ let engineBusy: () => { running: boolean; openPositions: number } = () => ({
 
 function publish(patch: Partial<UpdateState>): void {
   state = { ...state, ...patch };
-  getWindow()?.webContents.send("update:state", state);
+  // A check that resolves while the window is tearing down would otherwise
+  // throw "Object has been destroyed": the window reference outlives its
+  // webContents, so null-checking alone is not enough.
+  const w = getWindow();
+  if (!w || w.isDestroyed() || w.webContents.isDestroyed()) return;
+  w.webContents.send("update:state", state);
 }
 
 export function getUpdateState(): UpdateState {
