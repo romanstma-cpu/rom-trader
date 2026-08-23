@@ -54,6 +54,12 @@ const api = {
     get: () => ipcRenderer.invoke("state:get"),
     set: (patch: unknown) => ipcRenderer.invoke("state:set", patch),
   },
+  update: {
+    get: () => ipcRenderer.invoke("update:get"),
+    check: () => ipcRenderer.invoke("update:check"),
+    install: (force: boolean) => ipcRenderer.invoke("update:install", force),
+    onState: (cb: (s: unknown) => void) => on("update:state", cb),
+  },
   window: {
     minimize: () => ipcRenderer.send("window:minimize"),
     maximize: () => ipcRenderer.send("window:maximize"),

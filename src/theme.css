@@ -130,9 +130,76 @@ body {
   background: #4a4166;
 }
 
+.tb-update {
+  -webkit-app-region: no-drag;
+  margin-left: 10px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: 99px;
+  background: linear-gradient(135deg, var(--violet), var(--pink));
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.tb-update:hover {
+  filter: brightness(1.15);
+}
+
 .tb-controls {
   display: flex;
   -webkit-app-region: no-drag;
+}
+
+/* ============ updates ============ */
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.update-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #4a4166;
+}
+.update-dot.checking,
+.update-dot.downloading {
+  background: var(--amber);
+}
+.update-dot.available,
+.update-dot.ready {
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+}
+.update-dot.current {
+  background: var(--green);
+}
+.update-dot.error {
+  background: var(--red);
+}
+
+.update-text {
+  color: var(--text);
+}
+
+.progress {
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 99px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--violet), var(--pink));
+  transition: width 0.25s ease;
 }
 
 .tb-controls button {

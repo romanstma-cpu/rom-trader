@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { installCrashHandlers, reportFatal } from "./crashlog";
+import { checkForUpdates, getUpdateState, initUpdater, installUpdate } from "./updater";
 import { TradingEngine } from "./engine/engine";
 import { KalshiClient } from "./engine/kalshi";
 import { STRATEGIES, findStrategy } from "./engine/strategies";
@@ -175,6 +176,10 @@ function registerIpc(): void {
   });
   ipcMain.on("window:close", () => win?.close());
   ipcMain.handle("window:isMaximized", () => win?.isMaximized() ?? false);
+
+  ipcMain.handle("update:get", () => getUpdateState());
+  ipcMain.handle("update:check", () => checkForUpdates());
+  ipcMain.handle("update:install", (_e, force: boolean) => installUpdate(force));
 }
 
 // A second launch should focus the running window rather than start a rival
@@ -204,6 +209,16 @@ if (!app.requestSingleInstanceLock()) {
 
       registerIpc();
       createWindow();
+
+      // The updater needs to know whether a restart would abandon a live
+      // session, so give it a read-only view of the engine.
+      initUpdater(
+        () => win,
+        () => {
+          const s = engine.getState();
+          return { running: s.status === "running", openPositions: s.positions.length };
+        },
+      );
 
       app.on("activate", () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();

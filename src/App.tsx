@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppSettings, EngineState } from "./types";
+import type { AppSettings, EngineState, UpdateState } from "./types";
 import Dashboard from "./pages/Dashboard";
 import Positions from "./pages/Positions";
 import Signals from "./pages/Signals";
@@ -40,6 +40,7 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [update, setUpdate] = useState<UpdateState | null>(null);
   const [confirmFlatten, setConfirmFlatten] = useState(false);
   const toast = useToast();
 
@@ -52,12 +53,15 @@ export default function App() {
     void window.rom.app.version().then(setVersion);
     void window.rom.state.get().then(setAppState);
     void window.rom.window.isMaximized().then(setMaximized);
+    void window.rom.update.get().then(setUpdate);
     const offState = window.rom.engine.onState(setState);
     const offMax = window.rom.window.onMaximizeChange(setMaximized);
+    const offUpdate = window.rom.update.onState(setUpdate);
     const poll = setInterval(() => void refresh(), 5000);
     return () => {
       offState();
       offMax();
+      offUpdate();
       clearInterval(poll);
     };
   }, [refresh]);
@@ -119,6 +123,11 @@ export default function App() {
           <span className={`dot ${running ? "on" : "off"}`} />
           <span className="tb-status">{running ? "Running" : "Idle"}</span>
           {state && !state.dryRun && <span className="pill live">LIVE</span>}
+          {update?.status === "ready" && (
+            <button className="tb-update" onClick={() => setPage("settings")}>
+              Update to v{update.newVersion}
+            </button>
+          )}
         </div>
         <div className="tb-controls">
           <button onClick={() => window.rom.window.minimize()} aria-label="Minimize">

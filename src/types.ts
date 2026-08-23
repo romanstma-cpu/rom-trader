@@ -137,6 +137,30 @@ export interface ExportResult {
   filePath?: string;
 }
 
+export type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "ready"
+  | "current"
+  | "error"
+  | "unsupported";
+
+export interface UpdateState {
+  status: UpdateStatus;
+  currentVersion: string;
+  newVersion: string | null;
+  percent: number;
+  message: string | null;
+  checkedAt: number | null;
+}
+
+export interface InstallRefusal {
+  installed: false;
+  reason: string;
+}
+
 export interface RomApi {
   engine: {
     start: () => Promise<void>;
@@ -182,6 +206,12 @@ export interface RomApi {
   state: {
     get: () => Promise<AppSettings>;
     set: (patch: Partial<AppSettings>) => Promise<AppSettings>;
+  };
+  update: {
+    get: () => Promise<UpdateState>;
+    check: () => Promise<UpdateState>;
+    install: (force: boolean) => Promise<InstallRefusal>;
+    onState: (cb: (s: UpdateState) => void) => () => void;
   };
   window: {
     minimize: () => void;

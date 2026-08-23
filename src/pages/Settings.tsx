@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppSettings, Settings } from "../types";
+import type { AppSettings, Settings, UpdateState } from "../types";
 import { Confirm, NumberField, Toggle, useToast } from "../ui";
 
 export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
@@ -8,12 +8,16 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
   const [dataDir, setDataDir] = useState("");
   const [dirty, setDirty] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [upd, setUpd] = useState<UpdateState | null>(null);
+  const [installBlocked, setInstallBlocked] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
     void window.rom.settings.get().then(setSettings);
     void window.rom.state.get().then(setAppState);
     void window.rom.app.dataDir().then(setDataDir);
+    void window.rom.update.get().then(setUpd);
+    return window.rom.update.onState(setUpd);
   }, []);
 
   if (!settings) return <div className="empty">Loading…</div>;
@@ -50,6 +54,29 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
       setDirty(false);
       onChanged();
       toast("ok", "Everything reset to defaults.");
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    }
+  }
+
+  async function checkUpdates() {
+    try {
+      setUpd(await window.rom.update.check());
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    }
+  }
+
+  async function install(force: boolean) {
+    setInstallBlocked(null);
+    try {
+      const res = await window.rom.update.install(force);
+      // A resolved value only comes back when the install was refused;
+      // otherwise the app is already restarting.
+      if (res && res.installed === false) {
+        if (force) toast("bad", res.reason);
+        else setInstallBlocked(res.reason);
+      }
     } catch (e) {
       toast("bad", (e as Error).message);
     }
@@ -211,6 +238,61 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
 
       <div className="card">
         <div className="card-head">
+          <div className="label">Updates</div>
+          <span className="hint">
+            {upd ? `You have v${upd.currentVersion}` : ""}
+          </span>
+        </div>
+
+        {upd?.status === "unsupported" ? (
+          <div className="field-help">{upd.message}</div>
+        ) : (
+          <>
+            <div className="update-row">
+              <span className={`update-dot ${upd?.status ?? "idle"}`} />
+              <span className="update-text">
+                {upd?.status === "checking" && "Checking for updates…"}
+                {upd?.status === "downloading" &&
+                  `Downloading v${upd.newVersion} — ${upd.percent}%`}
+                {upd?.status === "available" && upd.message}
+                {upd?.status === "ready" && upd.message}
+                {upd?.status === "current" && upd.message}
+                {upd?.status === "error" && upd.message}
+                {(!upd || upd.status === "idle") && "No update check yet."}
+              </span>
+            </div>
+
+            {upd?.status === "downloading" && (
+              <div className="progress" role="progressbar" aria-valuenow={upd.percent} aria-valuemin={0} aria-valuemax={100}>
+                <div className="progress-fill" style={{ width: `${upd.percent}%` }} />
+              </div>
+            )}
+
+            <div className="field-help" style={{ marginTop: 8 }}>
+              Updates download in the background but never install on their own — restarting mid-session
+              would abandon any open position, so installing is always your call.
+            </div>
+
+            <div className="row-actions">
+              <button
+                className="btn quiet"
+                onClick={checkUpdates}
+                disabled={upd?.status === "checking" || upd?.status === "downloading"}
+              >
+                {upd?.status === "checking" ? "Checking…" : "Check for updates"}
+              </button>
+              {upd?.status === "ready" && (
+                <button className="btn primary" onClick={() => install(false)}>
+                  Restart and install v{upd.newVersion}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
           <div className="label">Application</div>
         </div>
         {appState && (
@@ -239,6 +321,32 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
         </div>
         {dataDir && <div className="path-hint">{dataDir}</div>}
       </div>
+
+      <Confirm
+        open={installBlocked !== null}
+        title="Stop trading and install?"
+        body={
+          <>
+            {installBlocked}
+            <br />
+            <br />
+            Continuing closes every open position at the current bid, records them to history, and
+            restarts into the new version.
+          </>
+        }
+        confirmLabel="Close positions and install"
+        danger
+        onConfirm={async () => {
+          try {
+            await window.rom.engine.stop();
+            onChanged();
+          } catch {
+            // fall through — the guard below is what actually matters
+          }
+          void install(true);
+        }}
+        onCancel={() => setInstallBlocked(null)}
+      />
 
       <Confirm
         open={confirmReset}
