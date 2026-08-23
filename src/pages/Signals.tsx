@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Signal } from "../types";
 import { timeAgo, useToast } from "../ui";
 
-export default function Signals({ running }: { running: boolean }) {
+export default function Signals({ running, idleHint }: { running: boolean; idleHint: string | null }) {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [onlyEligible, setOnlyEligible] = useState(false);
   const toast = useToast();
@@ -43,6 +43,8 @@ export default function Signals({ running }: { running: boolean }) {
         Every market the last sweep looked at, strongest movers first, with the reason it did or
         didn't qualify. This is the bot showing its work.
       </div>
+
+      {idleHint && <div className="notice">{idleHint}</div>}
 
       <div className="toolbar">
         <label className="check">

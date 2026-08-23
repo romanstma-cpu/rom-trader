@@ -30,6 +30,7 @@ export interface ScannerStats {
   skippedSpread: number;
   skippedPrice: number;
   skippedWarmup: number;
+  skippedCooldown: number;
   scanMs: number;
 }
 
@@ -51,6 +52,7 @@ export interface EngineState {
   lastError: string | null;
   haltedReason: string | null;
   scanner: ScannerStats | null;
+  idleHint: string | null;
   startedAt: number | null;
 }
 
@@ -75,6 +77,7 @@ export interface Settings {
   minPriceCents: number;
   maxPriceCents: number;
   dailyLossLimitUsd: number;
+  reentryCooldownSeconds: number;
 }
 
 export type StrategyParams = Omit<

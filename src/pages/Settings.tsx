@@ -148,6 +148,15 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             max={600}
             onChange={(v) => update({ tickSeconds: v })}
           />
+          <NumberField
+            label="Re-entry cooldown"
+            suffix="s"
+            help="After closing a market, wait this long before buying it again. Without it a take-profit can re-buy at the ask on the very next scan and pay the spread twice. 0 disables."
+            value={settings.reentryCooldownSeconds}
+            min={0}
+            max={3600}
+            onChange={(v) => update({ reentryCooldownSeconds: v })}
+          />
         </div>
         {settings.takeProfitCents <= settings.stopLossCents && (
           <div className="notice warn">

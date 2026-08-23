@@ -17,6 +17,7 @@ export interface Settings {
   minPriceCents: number; // ignore markets cheaper than this
   maxPriceCents: number; // ignore markets richer than this
   dailyLossLimitUsd: number; // engine halts itself past this loss; 0 disables
+  reentryCooldownSeconds: number; // block re-entering a ticker just exited; 0 disables
 }
 
 export interface AppState {
@@ -66,6 +67,7 @@ export const DEFAULT_SETTINGS: Settings = {
   minPriceCents: 5,
   maxPriceCents: 90,
   dailyLossLimitUsd: 50,
+  reentryCooldownSeconds: 90,
 };
 
 export const DEFAULT_APP_STATE: AppState = {
@@ -138,6 +140,7 @@ function sanitize(s: Settings): Settings {
     minPriceCents: num(s.minPriceCents, 1, 98, 5),
     maxPriceCents: num(s.maxPriceCents, 2, 99, 90),
     dailyLossLimitUsd: num(s.dailyLossLimitUsd, 0, 1_000_000, 50),
+    reentryCooldownSeconds: num(s.reentryCooldownSeconds, 0, 3600, 90),
   };
 }
 

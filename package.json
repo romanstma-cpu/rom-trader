@@ -10,7 +10,11 @@
     "build:main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --external:electron --outdir=dist-electron --format=cjs",
     "build": "npm run build:renderer && npm run build:main",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --win"
+    "dist": "npm run build && electron-builder --win",
+    "typecheck": "tsc --noEmit",
+    "playtest": "esbuild test/playtest.ts --bundle --platform=node --alias:electron=./test/electron-stub.js --outfile=test/playtest.js && node test/playtest.js",
+    "smoke": "esbuild test/headless.ts --bundle --platform=node --alias:electron=./test/electron-stub.js --outfile=test/headless.js && node test/headless.js",
+    "check": "npm run typecheck && npm run playtest"
   },
   "dependencies": {
     "react": "^18.3.1",

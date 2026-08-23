@@ -40,6 +40,7 @@ export interface ScannerStats {
   skippedSpread: number;
   skippedPrice: number;
   skippedWarmup: number;
+  skippedCooldown: number;
   scanMs: number;
 }
 
@@ -61,6 +62,8 @@ export interface EngineState {
   lastError: string | null;
   haltedReason: string | null;
   scanner: ScannerStats | null;
+  /** Set when scans keep finding nothing, naming the filter doing the blocking. */
+  idleHint: string | null;
   startedAt: number | null;
 }
 
@@ -99,8 +102,10 @@ export class TradingEngine {
   private sessionRealizedUsd = 0;
   private positions: Position[] = [];
   private priceHistory = new Map<string, number[]>(); // ticker -> recent mids (cents)
+  private cooldownUntil = new Map<string, number>(); // ticker -> ms timestamp
   private signals: Signal[] = [];
   private scanner: ScannerStats | null = null;
+  private emptyScans = 0;
 
   private static readonly LOOKBACK = 3; // samples back for momentum
   private static readonly MAX_HISTORY = 20;
@@ -170,6 +175,7 @@ export class TradingEngine {
       lastError: this.lastError,
       haltedReason: this.haltedReason,
       scanner: this.scanner,
+      idleHint: this.idleHint(),
       startedAt: this.startedAt,
     };
   }
@@ -194,7 +200,9 @@ export class TradingEngine {
     this.cashUsd = this.settings.dryRunCash;
     this.startedAt = Date.now();
     this.priceHistory.clear();
+    this.cooldownUntil.clear();
     this.signals = [];
+    this.emptyScans = 0;
     this.log(
       "info",
       `Engine started (${this.isLive ? "LIVE" : "DRY-RUN"} mode, ` +
@@ -264,6 +272,55 @@ export class TradingEngine {
     this.stop();
   }
 
+  /**
+   * A conservative default spread limit against real Kalshi books rejects
+   * nearly everything, which looks identical to a broken bot. After a few
+   * barren scans, say which filter is doing it and which setting relaxes it.
+   */
+  private idleHint(): string | null {
+    const s = this.scanner;
+    if (!s || this.emptyScans < 3 || s.marketsScanned === 0) return null;
+
+    const underTrigger = Math.max(
+      0,
+      s.marketsScanned - s.skippedSpread - s.skippedPrice - s.skippedWarmup - s.skippedCooldown,
+    );
+    const causes = [
+      {
+        n: s.skippedSpread,
+        msg:
+          `${s.skippedSpread} of ${s.marketsScanned} markets have a spread wider than your ` +
+          `${this.settings.maxSpreadCents}c limit. Raise "Max spread" in Settings to include them — ` +
+          `but you pay that spread the moment you enter.`,
+      },
+      {
+        n: s.skippedPrice,
+        msg:
+          `${s.skippedPrice} of ${s.marketsScanned} markets sit outside your ` +
+          `${this.settings.minPriceCents}–${this.settings.maxPriceCents}c price band. Widen it in Settings.`,
+      },
+      {
+        n: underTrigger,
+        msg:
+          `Markets are clearing your filters, but none has moved ` +
+          `${this.settings.momentumThresholdCents}c. Lower the momentum trigger in Settings to act on smaller moves.`,
+      },
+    ].sort((a, b) => b.n - a.n);
+
+    if (causes[0].n === 0) return null;
+    return `No entries in the last ${this.emptyScans} scans. ${causes[0].msg}`;
+  }
+
+  private coolingDown(ticker: string): boolean {
+    const until = this.cooldownUntil.get(ticker);
+    if (until === undefined) return false;
+    if (Date.now() >= until) {
+      this.cooldownUntil.delete(ticker);
+      return false;
+    }
+    return true;
+  }
+
   private mid(m: KalshiMarket): number {
     return m.yes_bid > 0 && m.yes_ask > 0 ? (m.yes_bid + m.yes_ask) / 2 : m.last_price;
   }
@@ -297,6 +354,7 @@ export class TradingEngine {
       skippedSpread: 0,
       skippedPrice: 0,
       skippedWarmup: 0,
+      skippedCooldown: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
@@ -330,6 +388,12 @@ export class TradingEngine {
         stats.skippedWarmup++;
       } else if (change < this.settings.momentumThresholdCents) {
         reason = `momentum ${fmtCents(change)} under ${this.settings.momentumThresholdCents}c trigger`;
+      } else if (this.coolingDown(m.ticker)) {
+        // Without this the same tick that takes profit re-buys at the ask,
+        // paying the spread again on a position we just sold at the bid.
+        const secs = Math.ceil(((this.cooldownUntil.get(m.ticker) ?? 0) - Date.now()) / 1000);
+        reason = `cooling down for ${secs}s after exiting`;
+        stats.skippedCooldown++;
       } else {
         eligible = true;
         stats.eligible++;
@@ -357,6 +421,7 @@ export class TradingEngine {
 
     stats.scanMs = Date.now() - began;
     this.scanner = stats;
+    this.emptyScans = stats.eligible > 0 ? 0 : this.emptyScans + 1;
     // Strongest movers first so the Signals page leads with what nearly traded.
     this.signals = seen
       .sort((a, b) => (b.changeCents ?? -99) - (a.changeCents ?? -99))
@@ -416,6 +481,9 @@ export class TradingEngine {
     this.sessionRealizedUsd += pnlUsd;
 
     this.positions = this.positions.filter((x) => x !== p);
+    if (this.settings.reentryCooldownSeconds > 0) {
+      this.cooldownUntil.set(p.ticker, Date.now() + this.settings.reentryCooldownSeconds * 1000);
+    }
     const rec: TradeRecord = {
       ticker: p.ticker,
       title: p.title,

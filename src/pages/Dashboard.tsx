@@ -39,6 +39,14 @@ export default function Dashboard({
       {state.lastError && !state.haltedReason && (
         <div className="notice warn">Last scan error: {state.lastError}</div>
       )}
+      {state.idleHint && !state.haltedReason && !state.lastError && (
+        <div className="notice" role="status">
+          <div>{state.idleHint}</div>
+          <button className="btn tiny" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      )}
 
       <div className="grid stats">
         <Stat
@@ -110,6 +118,10 @@ export default function Dashboard({
               <div>
                 <span className="k">Warming up</span>
                 <span className="v">{state.scanner.skippedWarmup}</span>
+              </div>
+              <div>
+                <span className="k">Cooling down</span>
+                <span className="v">{state.scanner.skippedCooldown}</span>
               </div>
               <div>
                 <span className="k">Scan time</span>

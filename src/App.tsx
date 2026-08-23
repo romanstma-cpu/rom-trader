@@ -217,7 +217,7 @@ export default function App() {
           <div className="content">
             {page === "dashboard" && <Dashboard state={state} onNavigate={(p) => setPage(p as Page)} />}
             {page === "positions" && <Positions state={state} />}
-            {page === "signals" && <Signals running={running} />}
+            {page === "signals" && <Signals running={running} idleHint={state?.idleHint ?? null} />}
             {page === "history" && <History onChanged={refresh} />}
             {page === "strategies" && <Strategies />}
             {page === "connection" && <Connection onChanged={refresh} />}

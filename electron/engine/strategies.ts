@@ -19,6 +19,7 @@ export interface Strategy {
     | "minPriceCents"
     | "maxPriceCents"
     | "dailyLossLimitUsd"
+    | "reentryCooldownSeconds"
   >;
 }
 
@@ -26,6 +27,9 @@ export interface Strategy {
  * Shipped presets. These are starting points chosen for how the momentum rule
  * behaves — not backtested edges. The copy in the UI says so plainly; nothing
  * here has a demonstrated forward edge and every preset defaults to dry-run.
+ *
+ * Every preset keeps take-profit strictly above stop-loss: at parity you need
+ * to win well over half your trades just to cover the spread you pay on entry.
  */
 export const STRATEGIES: Strategy[] = [
   {
@@ -47,6 +51,7 @@ export const STRATEGIES: Strategy[] = [
       minPriceCents: 10,
       maxPriceCents: 85,
       dailyLossLimitUsd: 25,
+      reentryCooldownSeconds: 180,
     },
   },
   {
@@ -69,6 +74,7 @@ export const STRATEGIES: Strategy[] = [
       minPriceCents: 5,
       maxPriceCents: 90,
       dailyLossLimitUsd: 50,
+      reentryCooldownSeconds: 90,
     },
   },
   {
@@ -76,7 +82,7 @@ export const STRATEGIES: Strategy[] = [
     name: "Scalper",
     tagline: "Fast ticks, tight stops, more trades.",
     detail:
-      "Polls every 8 seconds and takes 2c moves, exiting quickly in both directions. " +
+      "Polls every 8 seconds and enters on a 2c push, taking 4c and stopping at 3c. " +
       "Generates far more trades, which means fees and spread cost dominate — the most " +
       "likely of the three to bleed. Paper-trade this one first.",
     risk: "high",
@@ -84,13 +90,14 @@ export const STRATEGIES: Strategy[] = [
       tradeSizeUsd: 8,
       maxPositions: 8,
       momentumThresholdCents: 2,
-      takeProfitCents: 3,
+      takeProfitCents: 4,
       stopLossCents: 3,
       tickSeconds: 8,
       maxSpreadCents: 1,
       minPriceCents: 15,
       maxPriceCents: 85,
       dailyLossLimitUsd: 40,
+      reentryCooldownSeconds: 30,
     },
   },
 ];

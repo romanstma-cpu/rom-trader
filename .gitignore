@@ -7,9 +7,11 @@ release/
 
 # bundled from test/headless.ts
 test/headless.js
+test/playtest.js
 
 # local editor / OS noise
 .vscode/
 .idea/
 Thumbs.db
 Desktop.ini
+
