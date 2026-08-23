@@ -25,6 +25,7 @@ export interface Strategy {
     | "dailyLossLimitUsd"
     | "reentryCooldownSeconds"
     | "maxConsecutiveLosses"
+    | "trailingStopCents"
   >;
 }
 
@@ -42,15 +43,15 @@ export const STRATEGIES: Strategy[] = [
     name: "Steady",
     tagline: "Small size, wide stops, few positions.",
     detail:
-      "Waits for a clear 4c push before entering and gives each trade room to breathe. " +
-      "Fewest trades of the three, so a single bad fill matters less. Start here.",
+      "Waits for a clear 4c push, then targets 14c with 14c of room. Fewest trades of " +
+      "the three, and the widest margin over the round-trip fee. Start here.",
     risk: "low",
     params: {
       tradeSizeUsd: 5,
       maxPositions: 3,
       momentumThresholdCents: 4,
-      takeProfitCents: 7,
-      stopLossCents: 5,
+      takeProfitCents: 14,
+      stopLossCents: 14,
       tickSeconds: 20,
       maxSpreadCents: 2,
       minPriceCents: 10,
@@ -59,6 +60,7 @@ export const STRATEGIES: Strategy[] = [
       reentryCooldownSeconds: 180,
       // Few trades, so a run of losses is a real signal rather than noise.
       maxConsecutiveLosses: 3,
+      trailingStopCents: 0,
     },
   },
   {
@@ -66,16 +68,16 @@ export const STRATEGIES: Strategy[] = [
     name: "Balanced",
     tagline: "The default. Moderate size and turnover.",
     detail:
-      "The stock configuration: a 3c momentum trigger, five concurrent positions and a " +
-      "6c/4c profit-to-stop ratio. A reasonable middle ground while you learn how the " +
-      "engine behaves on live prices.",
+      "The stock configuration: a 3c momentum trigger, five concurrent positions, and a " +
+      "12c target with 12c of room — wide enough that the round-trip fee and the spread " +
+      "do not decide the outcome. A middle ground while you learn how the engine behaves.",
     risk: "medium",
     params: {
       tradeSizeUsd: 10,
       maxPositions: 5,
       momentumThresholdCents: 3,
-      takeProfitCents: 6,
-      stopLossCents: 4,
+      takeProfitCents: 12,
+      stopLossCents: 12,
       tickSeconds: 15,
       maxSpreadCents: 2,
       minPriceCents: 5,
@@ -83,6 +85,7 @@ export const STRATEGIES: Strategy[] = [
       dailyLossLimitUsd: 50,
       reentryCooldownSeconds: 90,
       maxConsecutiveLosses: 4,
+      trailingStopCents: 0,
     },
   },
   {
@@ -90,7 +93,7 @@ export const STRATEGIES: Strategy[] = [
     name: "Scalper",
     tagline: "Fast ticks, tight stops, more trades.",
     detail:
-      "Polls every 8 seconds and enters on a 2c push, taking 4c and stopping at 3c. " +
+      "Polls every 8 seconds and enters on a 2c push, taking 8c and stopping at 8c. " +
       "Generates far more trades, which means fees and spread cost dominate — the most " +
       "likely of the three to bleed. Paper-trade this one first.",
     risk: "high",
@@ -98,8 +101,8 @@ export const STRATEGIES: Strategy[] = [
       tradeSizeUsd: 8,
       maxPositions: 8,
       momentumThresholdCents: 2,
-      takeProfitCents: 4,
-      stopLossCents: 3,
+      takeProfitCents: 8,
+      stopLossCents: 8,
       tickSeconds: 8,
       maxSpreadCents: 1,
       minPriceCents: 15,
@@ -108,6 +111,7 @@ export const STRATEGIES: Strategy[] = [
       reentryCooldownSeconds: 30,
       // Many small trades, so short losing runs are ordinary variance.
       maxConsecutiveLosses: 6,
+      trailingStopCents: 0,
     },
   },
 ];

@@ -32,6 +32,7 @@ export interface ScannerStats {
   skippedWarmup: number;
   skippedCooldown: number;
   skippedClock: number;
+  skippedFees: number;
   scanMs: number;
 }
 
@@ -79,6 +80,7 @@ export interface Settings {
   dailyLossLimitUsd: number;
   reentryCooldownSeconds: number;
   maxConsecutiveLosses: number;
+  trailingStopCents: number;
   tradingHoursEnabled: boolean;
   tradingStartHour: number;
   tradingEndHour: number;

@@ -43,6 +43,13 @@ import {
   recordingInfo,
 } from "../electron/engine/recorder";
 import { compareStrategies, runBacktest } from "../electron/engine/backtest";
+import {
+  breakEvenWinRate,
+  netEdgeCents,
+  roundTripFeeCentsPerContract,
+  roundTripFeeUsd,
+  takerFeeUsd,
+} from "../electron/engine/fees";
 
 let passed = 0;
 const failures: string[] = [];
@@ -112,10 +119,22 @@ check("ids are unique", new Set(STRATEGIES.map((s) => s.id)).size === STRATEGIES
 check("unknown id is not found", findStrategy("nope") === undefined);
 
 for (const s of STRATEGIES) {
+  // Not "take-profit beats stop", which is the folk rule and is wrong here.
+  // Entry is at the ask and exit at the bid, so a position opens down the
+  // spread: the price must move (tp + spread) to win but only (sl - spread)
+  // to lose. A stop tighter than the target is therefore the losing side of a
+  // trade before it starts. What actually has to hold is that a win clears
+  // the round-trip fee, and that the stop leaves room beyond the spread.
+  const mid = Math.round((s.params.minPriceCents + s.params.maxPriceCents) / 2);
   check(
-    `${s.name}: take-profit exceeds stop`,
-    s.params.takeProfitCents > s.params.stopLossCents,
-    `${s.params.takeProfitCents}c vs ${s.params.stopLossCents}c`,
+    `${s.name}: take-profit clears the round-trip fee`,
+    netEdgeCents(s.params.takeProfitCents, mid) > 0,
+    `tp ${s.params.takeProfitCents}c vs ${roundTripFeeCentsPerContract(mid).toFixed(1)}c fee at ${mid}c`,
+  );
+  check(
+    `${s.name}: the stop leaves room past the spread`,
+    s.params.stopLossCents > s.params.maxSpreadCents,
+    `sl ${s.params.stopLossCents}c vs ${s.params.maxSpreadCents}c spread`,
   );
   check(
     `${s.name}: price band is sane`,
@@ -525,6 +544,97 @@ reset();
     threwQuiet = true;
   }
   check("a subscriber without onEvent is fine", !threwQuiet);
+}
+
+// ---------------------------------------------------------------- fees
+
+section("Kalshi fees");
+// ceil_to_cent(0.07 × C × P × (1−P)). At 50c with 20 contracts:
+// 0.07 × 20 × 0.25 = $0.35 exactly.
+check("fee at the 50c peak", takerFeeUsd(20, 50) === 0.35, `${takerFeeUsd(20, 50)}`);
+check("the curve is symmetric", takerFeeUsd(20, 30) === takerFeeUsd(20, 70));
+check("cheaper away from 50c", takerFeeUsd(20, 20) < takerFeeUsd(20, 50));
+check("near-certain markets are cheapest", takerFeeUsd(20, 95) < takerFeeUsd(20, 20));
+check("no contracts, no fee", takerFeeUsd(0, 50) === 0);
+check("fees round up to the cent, never down", takerFeeUsd(1, 50) === 0.02, `${takerFeeUsd(1, 50)}`);
+
+check(
+  "a round trip is charged twice",
+  roundTripFeeUsd(20, 50, 50) === 2 * takerFeeUsd(20, 50),
+);
+check(
+  "round trip near 50c is about 3.5c per contract",
+  Math.abs(roundTripFeeCentsPerContract(50) - 3.5) < 0.2,
+  `${roundTripFeeCentsPerContract(50).toFixed(2)}c`,
+);
+
+// The reason the old 6c take-profit was a bad deal, stated as a test.
+check("a 6c target barely clears the fee at 50c", netEdgeCents(6, 50) < 3);
+check("a 12c target clears it with room", netEdgeCents(12, 50) > 8);
+check("a 3c target cannot clear it at all", netEdgeCents(3, 50) < 0);
+
+check(
+  "a target under the fee has no break-even win rate",
+  breakEvenWinRate(3, 5, 50) === null,
+);
+check(
+  "the old 6c/4c defaults needed a very high win rate",
+  (breakEvenWinRate(6, 4, 50) ?? 0) > 0.7,
+  `${(((breakEvenWinRate(6, 4, 50) ?? 0) * 100)).toFixed(0)}%`,
+);
+check(
+  "the new 12c/12c defaults need a plausible one",
+  (breakEvenWinRate(12, 12, 50) ?? 1) < 0.68,
+  `${(((breakEvenWinRate(12, 12, 50) ?? 0) * 100)).toFixed(0)}%`,
+);
+
+section("fees reach the ledger");
+reset();
+{
+  // A position opened and closed at the same price must lose exactly the
+  // round trip, not break even.
+  const flat5 = [mkt("KXF", 40, 41)];
+  const up5 = [mkt("KXF", 45, 46)];
+  const e = runEngine({ momentumThresholdCents: 3, trailingStopCents: 0 }, [
+    flat5, flat5, flat5, flat5, up5,
+  ]);
+  check("a position opened", e.getState().positions.length === 1);
+  check(
+    "it is already down the spread and both fees",
+    e.getState().positions[0].unrealizedUsd < 0,
+    `${e.getState().positions[0].unrealizedUsd}`,
+  );
+  check(
+    "the entry fee is recorded on the position",
+    e.getState().positions[0].entryFeeUsd > 0,
+  );
+
+  e.flatten();
+  const closed = loadHistory();
+  check("closing recorded a trade", closed.length === 1);
+  check(
+    "a flat round trip loses money rather than breaking even",
+    closed.length > 0 && closed[0].pnlUsd < 0,
+    `${closed[0]?.pnlUsd}`,
+  );
+}
+
+section("trades that cannot win are refused");
+reset();
+{
+  // 3c take-profit cannot clear a 3.5c round trip at any win rate.
+  const flat6 = [mkt("KXG", 48, 49)];
+  const up6 = [mkt("KXG", 53, 54)];
+  const e = runEngine({ takeProfitCents: 3, momentumThresholdCents: 3 }, [
+    flat6, flat6, flat6, flat6, up6,
+  ]);
+  check("no position is opened", e.getState().positions.length === 0);
+  check("the scanner counts the refusal", (e.getState().scanner?.skippedFees ?? 0) > 0);
+  check(
+    "the signal explains it in cents",
+    e.getSignals().some((s) => s.reason.includes("round-trip fee")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
 }
 
 // ---------------------------------------------------------------- backtest

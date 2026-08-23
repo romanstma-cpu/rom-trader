@@ -10,6 +10,7 @@ test/headless.js
 test/playtest.js
 test/dpapi-check.js
 test/tray-check.js
+scripts/simulate.js
 
 # local editor / OS noise
 .vscode/

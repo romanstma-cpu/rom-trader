@@ -22,6 +22,13 @@ export interface Settings {
   dailyLossLimitUsd: number; // engine halts itself past this loss; 0 disables
   reentryCooldownSeconds: number; // block re-entering a ticker just exited; 0 disables
   maxConsecutiveLosses: number; // halt after this many losses in a row; 0 disables
+  /**
+   * Exit once the mid falls this far from its peak. 0 disables.
+   *
+   * Until 1.4.0 this reused the entry trigger, so a 3c pullback closed every
+   * position and the stop-loss setting almost never got a say.
+   */
+  trailingStopCents: number;
   tradingHoursEnabled: boolean; // confine entries to a window of the local day
   tradingStartHour: number; // 0-23, inclusive
   tradingEndHour: number; // 0-23, exclusive; may wrap past midnight
@@ -69,8 +76,12 @@ export const DEFAULT_SETTINGS: Settings = {
   tradeSizeUsd: 10,
   maxPositions: 5,
   momentumThresholdCents: 3,
-  takeProfitCents: 6,
-  stopLossCents: 4,
+  // Must clear the ~3.5c round-trip fee plus the 2c spread with room to
+  // spare, or a win is not worth taking. See docs/STRATEGY-FINDINGS.md.
+  takeProfitCents: 12,
+  // Was 4c, which with a 2c spread left only 2c of room and stopped trades out
+  // almost on entry.
+  stopLossCents: 12,
   tickSeconds: 15,
   maxSpreadCents: 2,
   minPriceCents: 5,
@@ -78,6 +89,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dailyLossLimitUsd: 50,
   reentryCooldownSeconds: 90,
   maxConsecutiveLosses: 4,
+  trailingStopCents: 0,
   tradingHoursEnabled: false,
   tradingStartHour: 9,
   tradingEndHour: 21,
@@ -162,6 +174,7 @@ function sanitize(s: Settings): Settings {
     dailyLossLimitUsd: num(s.dailyLossLimitUsd, 0, 1_000_000, 50),
     reentryCooldownSeconds: num(s.reentryCooldownSeconds, 0, 3600, 90),
     maxConsecutiveLosses: Math.round(num(s.maxConsecutiveLosses, 0, 100, 4)),
+    trailingStopCents: Math.round(num(s.trailingStopCents, 0, 90, 0)),
     tradingHoursEnabled: Boolean(s.tradingHoursEnabled),
     tradingStartHour: Math.round(num(s.tradingStartHour, 0, 23, 9)),
     tradingEndHour: Math.round(num(s.tradingEndHour, 0, 23, 21)),

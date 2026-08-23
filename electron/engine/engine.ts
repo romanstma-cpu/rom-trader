@@ -1,5 +1,6 @@
 import type { Credentials } from "./credentials";
 import { KalshiClient, KalshiMarket } from "./kalshi";
+import { netEdgeCents, roundTripFeeCentsPerContract, takerFeeUsd } from "./fees";
 import {
   EquityPoint,
   Settings,
@@ -18,6 +19,8 @@ export interface Position {
   currentBidCents: number;
   peakMidCents: number;
   unrealizedUsd: number;
+  /** Taker fee already paid to open, carried so the exit can net it out. */
+  entryFeeUsd: number;
   openedAt: number;
 }
 
@@ -45,6 +48,8 @@ export interface ScannerStats {
   skippedCooldown: number;
   /** Blocked because the clock is outside the configured trading window. */
   skippedClock: number;
+  /** Blocked because the take-profit cannot clear the round-trip fee. */
+  skippedFees: number;
   scanMs: number;
 }
 
@@ -402,7 +407,8 @@ export class TradingEngine {
         s.skippedPrice -
         s.skippedWarmup -
         s.skippedCooldown -
-        s.skippedClock,
+        s.skippedClock -
+        s.skippedFees,
     );
     const causes = [
       {
@@ -451,16 +457,26 @@ export class TradingEngine {
       if (!m) continue; // market fell out of the top list; keep at last price
       p.currentBidCents = m.yes_bid;
       p.peakMidCents = Math.max(p.peakMidCents, this.mid(m));
+      // Net of both fees: the entry fee is spent and the exit fee is certain,
+      // so a position that looks flat gross is really down by the round trip.
       const pnlCents = (m.yes_bid - p.entryCents) * p.contracts;
-      p.unrealizedUsd = round2(pnlCents / 100);
+      p.unrealizedUsd = round2(
+        pnlCents / 100 - p.entryFeeUsd - takerFeeUsd(p.contracts, m.yes_bid),
+      );
 
       const perContract = m.yes_bid - p.entryCents;
       if (perContract >= this.settings.takeProfitCents) {
         this.closePosition(p, "take-profit");
       } else if (perContract <= -this.settings.stopLossCents) {
         this.closePosition(p, "stop-loss");
-      } else if (p.peakMidCents - this.mid(m) >= this.settings.momentumThresholdCents) {
-        this.closePosition(p, "momentum reversal");
+      } else if (
+        // Its own setting since 1.4.0. Reusing the entry trigger here made
+        // this fire on any small pullback, which closed most positions before
+        // the take-profit or the stop-loss could apply.
+        this.settings.trailingStopCents > 0 &&
+        p.peakMidCents - this.mid(m) >= this.settings.trailingStopCents
+      ) {
+        this.closePosition(p, "trailing stop");
       }
     }
   }
@@ -480,6 +496,7 @@ export class TradingEngine {
       skippedWarmup: 0,
       skippedCooldown: 0,
       skippedClock: 0,
+      skippedFees: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
@@ -518,6 +535,13 @@ export class TradingEngine {
         stats.skippedWarmup++;
       } else if (change < this.settings.momentumThresholdCents) {
         reason = `momentum ${fmtCents(change)} under ${this.settings.momentumThresholdCents}c trigger`;
+      } else if (netEdgeCents(this.settings.takeProfitCents, m.yes_ask) <= 0) {
+        // The take-profit does not cover the round-trip fee at this price, so
+        // the trade loses money even when it works. No win rate rescues that.
+        reason =
+          `take-profit ${this.settings.takeProfitCents}c does not clear the ` +
+          `${roundTripFeeCentsPerContract(m.yes_ask).toFixed(1)}c round-trip fee at ${m.yes_ask}c`;
+        stats.skippedFees++;
       } else if (this.coolingDown(m.ticker)) {
         // Without this the same tick that takes profit re-buys at the ask,
         // paying the spread again on a position we just sold at the bid.
@@ -579,7 +603,10 @@ export class TradingEngine {
         .catch((e) => this.log("error", `Live order failed for ${m.ticker}: ${e.message}`));
     }
 
-    this.cashUsd -= costUsd;
+    // Taker fee on the way in. Charged to cash immediately, the way Kalshi
+    // does, so paper trading reports the same number live trading would.
+    const entryFeeUsd = takerFeeUsd(contracts, m.yes_ask);
+    this.cashUsd -= costUsd + entryFeeUsd;
     this.positions.push({
       ticker: m.ticker,
       title: m.title,
@@ -588,7 +615,14 @@ export class TradingEngine {
       contracts,
       currentBidCents: m.yes_bid,
       peakMidCents: this.mid(m),
-      unrealizedUsd: round2(((m.yes_bid - m.yes_ask) * contracts) / 100),
+      // Already down the spread and both fees the moment it opens: the exit
+      // fee is unavoidable, so showing it later would flatter the position.
+      unrealizedUsd: round2(
+        ((m.yes_bid - m.yes_ask) * contracts) / 100 -
+          entryFeeUsd -
+          takerFeeUsd(contracts, m.yes_bid),
+      ),
+      entryFeeUsd,
       openedAt: Date.now(),
     });
     this.log(
@@ -611,8 +645,11 @@ export class TradingEngine {
         .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`));
     }
 
-    const proceedsUsd = (p.currentBidCents * p.contracts) / 100;
-    const pnlUsd = round2(proceedsUsd - (p.entryCents * p.contracts) / 100);
+    const exitFeeUsd = takerFeeUsd(p.contracts, p.currentBidCents);
+    const proceedsUsd = (p.currentBidCents * p.contracts) / 100 - exitFeeUsd;
+    // Both fees come out of the recorded result, so history and the equity
+    // curve show what actually landed rather than a gross figure.
+    const pnlUsd = round2(proceedsUsd - (p.entryCents * p.contracts) / 100 - p.entryFeeUsd);
     this.cashUsd += proceedsUsd;
     this.sessionRealizedUsd += pnlUsd;
 

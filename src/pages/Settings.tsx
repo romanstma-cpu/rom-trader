@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import type { AppSettings, Settings, UpdateState } from "../types";
 import { Confirm, NumberField, Toggle, useToast } from "../ui";
+// Shared with the engine rather than reimplemented: a fee formula that drifts
+// between what the UI promises and what the bot charges is worse than none.
+import {
+  breakEvenWinRate,
+  roundTripFeeCentsPerContract,
+  roundTripFeeUsd,
+} from "../../electron/engine/fees";
 
 export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -82,8 +89,19 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
     }
   }
 
-  const riskPerTrade = (settings.tradeSizeUsd * settings.stopLossCents) / 100;
+  // Worked at the midpoint of the configured price band, which is where the
+  // fee curve peaks and therefore where the numbers are least flattering.
+  const refPrice = Math.round((settings.minPriceCents + settings.maxPriceCents) / 2);
+  const contracts = Math.max(1, Math.floor((settings.tradeSizeUsd * 100) / refPrice));
+  const feeUsd = roundTripFeeUsd(contracts, refPrice, refPrice);
+  const feeCents = roundTripFeeCentsPerContract(refPrice);
+
+  // The old figure assumed $1 contracts and ignored fees, so it understated a
+  // stop-out by more than half at mid prices.
+  const riskPerTrade = (contracts * settings.stopLossCents) / 100 + feeUsd;
+  const rewardPerTrade = (contracts * settings.takeProfitCents) / 100 - feeUsd;
   const maxExposure = settings.tradeSizeUsd * settings.maxPositions;
+  const breakEven = breakEvenWinRate(settings.takeProfitCents, settings.stopLossCents, refPrice);
 
   return (
     <>
@@ -139,8 +157,25 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
         </div>
         <div className="callout">
           At these settings a stopped-out trade loses about{" "}
-          <strong>${riskPerTrade.toFixed(2)}</strong>, and the most you can have at risk at once is{" "}
-          <strong>${maxExposure.toFixed(2)}</strong>.
+          <strong>${riskPerTrade.toFixed(2)}</strong> and a winner makes{" "}
+          <strong>${rewardPerTrade.toFixed(2)}</strong>, both after Kalshi's fee. The most you can
+          have at risk at once is <strong>${maxExposure.toFixed(2)}</strong>.
+          <br />
+          <br />
+          Around {refPrice}c the round trip costs <strong>{feeCents.toFixed(1)}c per contract</strong>{" "}
+          — about ${feeUsd.toFixed(2)} on a ${settings.tradeSizeUsd} position, paid whether the trade
+          wins or loses.{" "}
+          {breakEven === null ? (
+            <strong className="neg">
+              Your take-profit does not cover that, so this configuration loses money however often
+              it is right.
+            </strong>
+          ) : (
+            <>
+              You need to win <strong>{(breakEven * 100).toFixed(0)}%</strong> of trades just to
+              break even.
+            </>
+          )}
         </div>
       </div>
 
