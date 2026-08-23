@@ -1,9 +1,9 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, shell } from "electron";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { installCrashHandlers, reportFatal } from "./crashlog";
 import { checkForUpdates, getUpdateState, initUpdater, installUpdate } from "./updater";
-import { TradingEngine } from "./engine/engine";
+import { type EngineEvent, TradingEngine } from "./engine/engine";
 import {
   clearCredentials,
   credentialStatus,
@@ -35,6 +35,11 @@ import {
 
 installCrashHandlers();
 
+// Windows routes toasts by App User Model ID and silently drops them when it
+// does not match a known shortcut. electron-builder registers this id from
+// build.appId when it creates the Start Menu entry, so it has to agree.
+if (process.platform === "win32") app.setAppUserModelId("trade.rom.app");
+
 let win: BrowserWindow | null = null;
 let engine: TradingEngine;
 
@@ -51,6 +56,105 @@ let engine: TradingEngine;
 function sendToRenderer(channel: string, payload?: unknown): void {
   if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
   win.webContents.send(channel, payload);
+}
+
+let tray: Tray | null = null;
+/** Set when the user really means to exit, so close-to-tray can be bypassed. */
+let quitting = false;
+
+function iconPath(): string {
+  return path.join(__dirname, "../assets/icon.ico");
+}
+
+/**
+ * A toast for the handful of events worth interrupting someone for.
+ *
+ * Silent by design: a bot that pings for every fill during an active session
+ * gets muted at the OS level, and then it cannot tell you about the halt that
+ * actually mattered.
+ */
+function notify(e: EngineEvent): void {
+  if (!loadAppState().notifications) return;
+  if (!Notification.isSupported()) return;
+  try {
+    const n = new Notification({
+      title: e.title,
+      body: e.body,
+      icon: iconPath(),
+      silent: e.kind !== "halted",
+    });
+    n.on("click", () => showWindow());
+    n.show();
+  } catch {
+    // Notifications are a convenience; never let one break a trading tick.
+  }
+}
+
+function showWindow(): void {
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  if (!win.isVisible()) win.show();
+  win.focus();
+}
+
+function refreshTray(): void {
+  if (!tray) return;
+  const s = engine?.getState();
+  const running = s?.status === "running";
+  const open = s?.positions.length ?? 0;
+
+  tray.setToolTip(
+    running
+      ? `ROM Trader — running${open > 0 ? `, ${open} open` : ""}`
+      : "ROM Trader — idle",
+  );
+
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: running ? `Running · ${open} open` : "Idle", enabled: false },
+      { type: "separator" },
+      { label: "Open ROM Trader", click: () => showWindow() },
+      {
+        label: running ? "Stop trading" : "Start trading",
+        click: () => {
+          if (running) engine.stop();
+          else engine.start();
+          refreshTray();
+        },
+      },
+      {
+        label: "Close all positions",
+        enabled: open > 0,
+        click: () => {
+          engine.flatten();
+          refreshTray();
+        },
+      },
+      { type: "separator" },
+      {
+        label: "Quit",
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function createTray(): void {
+  if (tray) return;
+  try {
+    tray = new Tray(iconPath());
+    tray.on("double-click", () => showWindow());
+    refreshTray();
+  } catch {
+    // Without a tray the app still works; it just cannot be hidden to one.
+    tray = null;
+  }
 }
 
 function createWindow(): void {
@@ -81,6 +185,15 @@ function createWindow(): void {
   const relay = () => sendToRenderer("window:maximizeChange", win?.isMaximized() ?? false);
   win.on("maximize", relay);
   win.on("unmaximize", relay);
+
+  // Closing hides the window instead of quitting, but only when the user has
+  // asked for that and there is a tray icon to get back from. Hiding with no
+  // way to reopen would look exactly like a crash that kept trading.
+  win.on("close", (e) => {
+    if (quitting || !loadAppState().closeToTray || !tray) return;
+    e.preventDefault();
+    win?.hide();
+  });
 
   const indexHtml = path.join(__dirname, "../dist/index.html");
   win.loadFile(indexHtml).catch((e) => {
@@ -231,11 +344,9 @@ function registerIpc(): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  });
+  // Launching again while hidden in the tray should bring the window back,
+  // not appear to do nothing.
+  app.on("second-instance", () => showWindow());
 
   app
     .whenReady()
@@ -248,8 +359,12 @@ if (!app.requestSingleInstanceLock()) {
 
       engine = new TradingEngine(loadSettings(), loadCredentials());
       engine.subscribe({
-        onState: (s) => sendToRenderer("engine:state", s),
+        onState: (s) => {
+          sendToRenderer("engine:state", s);
+          refreshTray();
+        },
         onLog: (l) => sendToRenderer("engine:log", l),
+        onEvent: (e) => notify(e),
       });
 
       // Seed one point so a fresh chart has a baseline instead of empty axes.
@@ -258,6 +373,7 @@ if (!app.requestSingleInstanceLock()) {
       }
 
       registerIpc();
+      createTray();
       createWindow();
 
       // The updater needs to know whether a restart would abandon a live
@@ -276,6 +392,11 @@ if (!app.requestSingleInstanceLock()) {
     })
     .catch((e) => reportFatal(e, "startup"));
 }
+
+// Signing out or shutting down Windows must not be intercepted by close-to-tray.
+app.on("before-quit", () => {
+  quitting = true;
+});
 
 app.on("window-all-closed", () => {
   engine?.stop();

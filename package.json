@@ -1,7 +1,7 @@
 {
   "name": "rom-trader",
   "productName": "ROM Trader",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "A simple Kalshi auto-trading bot. Momentum engine, live dashboard, trade history.",
   "main": "dist-electron/main.js",
   "license": "MIT",
@@ -26,8 +26,10 @@
     "typecheck": "tsc --noEmit",
     "playtest": "esbuild test/playtest.ts --bundle --platform=node --alias:electron=./test/electron-stub.js --outfile=test/playtest.js && node test/playtest.js",
     "smoke": "esbuild test/headless.ts --bundle --platform=node --alias:electron=./test/electron-stub.js --outfile=test/headless.js && node test/headless.js",
+    "traycheck": "esbuild test/tray-check.ts --bundle --platform=node --outfile=test/tray-check.js --format=cjs && node test/tray-check.js",
     "dpapi": "esbuild test/dpapi-check.ts --bundle --platform=node --external:electron --outfile=test/dpapi-check.js --format=cjs && electron test/dpapi-check.js",
-    "check": "npm run typecheck && npm run playtest"
+    "check": "npm run typecheck && npm run playtest",
+    "check:all": "npm run typecheck && npm run playtest && npm run dpapi && npm run build && npm run traycheck"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

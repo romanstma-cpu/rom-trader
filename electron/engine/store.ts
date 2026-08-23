@@ -21,12 +21,20 @@ export interface Settings {
   maxPriceCents: number; // ignore markets richer than this
   dailyLossLimitUsd: number; // engine halts itself past this loss; 0 disables
   reentryCooldownSeconds: number; // block re-entering a ticker just exited; 0 disables
+  maxConsecutiveLosses: number; // halt after this many losses in a row; 0 disables
+  tradingHoursEnabled: boolean; // confine entries to a window of the local day
+  tradingStartHour: number; // 0-23, inclusive
+  tradingEndHour: number; // 0-23, exclusive; may wrap past midnight
 }
 
 export interface AppState {
   disclaimerAccepted: boolean;
   startMinimized: boolean;
   startWithWindows: boolean;
+  /** Windows toasts for fills, exits and halts. */
+  notifications: boolean;
+  /** Closing the window leaves the engine running in the tray. */
+  closeToTray: boolean;
 }
 
 export interface Profile {
@@ -69,12 +77,18 @@ export const DEFAULT_SETTINGS: Settings = {
   maxPriceCents: 90,
   dailyLossLimitUsd: 50,
   reentryCooldownSeconds: 90,
+  maxConsecutiveLosses: 4,
+  tradingHoursEnabled: false,
+  tradingStartHour: 9,
+  tradingEndHour: 21,
 };
 
 export const DEFAULT_APP_STATE: AppState = {
   disclaimerAccepted: false,
   startMinimized: false,
   startWithWindows: false,
+  notifications: true,
+  closeToTray: false,
 };
 
 const MAX_EQUITY_POINTS = 720;
@@ -147,6 +161,10 @@ function sanitize(s: Settings): Settings {
     maxPriceCents: num(s.maxPriceCents, 2, 99, 90),
     dailyLossLimitUsd: num(s.dailyLossLimitUsd, 0, 1_000_000, 50),
     reentryCooldownSeconds: num(s.reentryCooldownSeconds, 0, 3600, 90),
+    maxConsecutiveLosses: Math.round(num(s.maxConsecutiveLosses, 0, 100, 4)),
+    tradingHoursEnabled: Boolean(s.tradingHoursEnabled),
+    tradingStartHour: Math.round(num(s.tradingStartHour, 0, 23, 9)),
+    tradingEndHour: Math.round(num(s.tradingEndHour, 0, 23, 21)),
   };
 }
 

@@ -281,12 +281,16 @@ function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
     updatePositions: (m: Mkt[]) => void;
     scanForEntries: (m: Mkt[], t: number) => void;
     enforceDailyLossLimit: () => void;
+    enforceLosingStreak: () => void;
   };
   anyE.status = "running";
   for (const book of books) {
     anyE.updatePositions(book);
     anyE.scanForEntries(book, Date.now());
+    // Mirrors the order in tick(); a brake left out here passes in tests and
+    // then does nothing in the running app.
     anyE.enforceDailyLossLimit();
+    anyE.enforceLosingStreak();
   }
   return e;
 }
@@ -393,6 +397,128 @@ check("halt explains itself", (e.getState().haltedReason ?? "").includes("Daily 
 clearHistory();
 e = runEngine({ dailyLossLimitUsd: 0 }, [flat]);
 check("a zero limit disables the halt", e.getState().status === "running");
+
+// ---------------------------------------------------------------- brakes
+
+section("losing-streak brake");
+reset();
+{
+  // Four losses in a row, newest last.
+  const losses: TradeRecord[] = [1, 2, 3, 4].map((n) => ({
+    ticker: `KXL-${n}`, title: "loss", side: "yes",
+    entryCents: 50, exitCents: 46, contracts: 10, pnlUsd: -0.4,
+    openedAt: Date.now() - n * 1000, closedAt: Date.now() - n * 900,
+    reason: "stop-loss", dryRun: true,
+  }));
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(losses), "utf-8");
+
+  const up = [mkt("KXS", 45, 46)];
+  const flat2 = [mkt("KXS", 40, 41)];
+  let e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
+  check("four losses in a row halts the engine", e.getState().status === "stopped");
+  check(
+    "the halt says why",
+    (e.getState().haltedReason ?? "").includes("losing trades in a row"),
+    e.getState().haltedReason ?? "",
+  );
+
+  e = runEngine({ maxConsecutiveLosses: 0 }, [flat2, flat2, flat2, flat2, up]);
+  check("a zero limit disables the streak brake", e.getState().status === "running");
+
+  e = runEngine({ maxConsecutiveLosses: 5 }, [flat2, flat2, flat2, flat2, up]);
+  check("a streak under the limit does not halt", e.getState().status === "running");
+
+  // A win between the losses breaks the streak, even with losses either side.
+  const withWin = [...losses];
+  withWin.splice(2, 0, { ...losses[0], ticker: "KXW", pnlUsd: 0.5, reason: "take-profit" });
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(withWin), "utf-8");
+  e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
+  check("a win breaks the streak", e.getState().status === "running");
+}
+
+section("trading hours");
+reset();
+{
+  const at = (h: number) => new Date(2026, 7, 23, h, 30, 0);
+  const engineWith = (s: Partial<typeof DEFAULT_SETTINGS>) =>
+    new TradingEngine({ ...DEFAULT_SETTINGS, ...s });
+
+  const off = engineWith({ tradingHoursEnabled: false, tradingStartHour: 9, tradingEndHour: 17 });
+  check("disabled means always open", off.withinTradingHours(at(3)));
+
+  const day = engineWith({ tradingHoursEnabled: true, tradingStartHour: 9, tradingEndHour: 17 });
+  check("inside a daytime window", day.withinTradingHours(at(12)));
+  check("before it opens", !day.withinTradingHours(at(8)));
+  check("the start hour is included", day.withinTradingHours(at(9)));
+  check("the end hour is excluded", !day.withinTradingHours(at(17)));
+  check("after it closes", !day.withinTradingHours(at(22)));
+
+  // 21:00 to 06:00 has to wrap past midnight rather than mean "never".
+  const night = engineWith({ tradingHoursEnabled: true, tradingStartHour: 21, tradingEndHour: 6 });
+  check("overnight: late evening is inside", night.withinTradingHours(at(23)));
+  check("overnight: after midnight is inside", night.withinTradingHours(at(2)));
+  check("overnight: the morning close is excluded", !night.withinTradingHours(at(6)));
+  check("overnight: the afternoon is outside", !night.withinTradingHours(at(15)));
+
+  const same = engineWith({ tradingHoursEnabled: true, tradingStartHour: 9, tradingEndHour: 9 });
+  check("a zero-width window is ignored rather than blocking everything", same.withinTradingHours(at(3)));
+
+  // And the gate must actually stop entries, not merely report.
+  const up = [mkt("KXH", 45, 46)];
+  const flat3 = [mkt("KXH", 40, 41)];
+  const hour = new Date().getHours();
+  const shut = runEngine(
+    // A one-hour window on the opposite side of the clock is always shut now.
+    { tradingHoursEnabled: true, tradingStartHour: (hour + 3) % 24, tradingEndHour: (hour + 4) % 24 },
+    [flat3, flat3, flat3, flat3, up],
+  );
+  check("no entries while the window is shut", shut.getState().positions.length === 0);
+  check("the scanner counts the clock skip", (shut.getState().scanner?.skippedClock ?? 0) > 0);
+  check(
+    "signals name the clock, not a spread",
+    shut.getSignals().some((s) => s.reason.includes("outside trading hours")),
+  );
+  check(
+    "the hint leads with the clock",
+    (shut.getState().idleHint ?? "").includes("Outside your trading hours"),
+  );
+}
+
+section("engine events");
+reset();
+{
+  const events: { kind: string; tone: string }[] = [];
+  const e = new TradingEngine({ ...DEFAULT_SETTINGS, momentumThresholdCents: 3 });
+  e.subscribe({ onState: () => {}, onLog: () => {}, onEvent: (ev) => events.push(ev) });
+
+  const anyE = e as unknown as {
+    status: string;
+    updatePositions: (m: Mkt[]) => void;
+    scanForEntries: (m: Mkt[], t: number) => void;
+  };
+  anyE.status = "running";
+  const flat4 = [mkt("KXE", 40, 41)];
+  for (const b of [flat4, flat4, flat4, flat4, [mkt("KXE", 45, 46)]]) {
+    anyE.updatePositions(b);
+    anyE.scanForEntries(b, Date.now());
+  }
+  check("opening a position raises an event", events.some((x) => x.kind === "opened"));
+
+  e.flatten();
+  check("closing raises an event", events.some((x) => x.kind === "closed"));
+  check("every event carries a tone", events.every((x) => x.tone.length > 0));
+
+  // A subscriber with no onEvent must not crash the engine.
+  const quiet = new TradingEngine({ ...DEFAULT_SETTINGS });
+  quiet.subscribe({ onState: () => {}, onLog: () => {} });
+  let threwQuiet = false;
+  try {
+    quiet.flatten();
+  } catch {
+    threwQuiet = true;
+  }
+  check("a subscriber without onEvent is fine", !threwQuiet);
+}
 
 // ---------------------------------------------------------------- shutdown
 

@@ -42,6 +42,8 @@ export interface ScannerStats {
   skippedPrice: number;
   skippedWarmup: number;
   skippedCooldown: number;
+  /** Blocked because the clock is outside the configured trading window. */
+  skippedClock: number;
   scanMs: number;
 }
 
@@ -74,9 +76,25 @@ export interface LogLine {
   msg: string;
 }
 
+/**
+ * Something worth interrupting the user for.
+ *
+ * Separate from the log, which records everything: a bot that runs in the
+ * background is only useful if the handful of things that actually matter can
+ * reach someone who is looking at a different window.
+ */
+export interface EngineEvent {
+  kind: "opened" | "closed" | "halted";
+  title: string;
+  body: string;
+  tone: "good" | "bad" | "info";
+}
+
 type Listener = {
   onState: (s: EngineState) => void;
   onLog: (l: LogLine) => void;
+  /** Optional: not every subscriber wants to be told about notable events. */
+  onEvent?: (e: EngineEvent) => void;
 };
 
 /**
@@ -254,6 +272,7 @@ export class TradingEngine {
       this.updatePositions(markets);
       this.scanForEntries(markets, began);
       this.enforceDailyLossLimit();
+      this.enforceLosingStreak();
       appendEquity({ ts: Date.now(), equityUsd: round2(this.equity()) });
       this.emitState();
     } catch (e) {
@@ -278,7 +297,29 @@ export class TradingEngine {
       `Daily loss limit hit (${money(today)} today, limit ${money(-limit)}). ` +
       `Engine stopped itself. Raise or clear the limit in Settings to resume.`;
     this.log("warn", this.haltedReason);
+    this.emitEvent({
+      kind: "halted",
+      tone: "bad",
+      title: "ROM Trader stopped itself",
+      body: `Daily loss limit hit — ${money(today)} today.`,
+    });
     this.stop();
+  }
+
+  /**
+   * Whether the clock allows opening anything right now.
+   *
+   * Only gates entries: a position opened before the window closed still gets
+   * managed to its exit, because abandoning one at a bell is worse than
+   * holding it a few minutes longer. An end hour at or before the start wraps
+   * past midnight, so 21 to 6 means overnight.
+   */
+  withinTradingHours(now = new Date()): boolean {
+    if (!this.settings.tradingHoursEnabled) return true;
+    const { tradingStartHour: start, tradingEndHour: end } = this.settings;
+    if (start === end) return true; // a zero-width window would mean "never"
+    const hour = now.getHours();
+    return start < end ? hour >= start && hour < end : hour >= start || hour < end;
   }
 
   /**
@@ -290,9 +331,24 @@ export class TradingEngine {
     const s = this.scanner;
     if (!s || this.emptyScans < 3 || s.marketsScanned === 0) return null;
 
+    // The clock beats every other explanation: nothing else matters while the
+    // window is shut, and "spread too wide" would be actively misleading.
+    if (s.skippedClock > 0) {
+      return (
+        `Outside your trading hours (${this.settings.tradingStartHour}:00–` +
+        `${this.settings.tradingEndHour}:00), so nothing is being bought. ` +
+        `Prices are still being tracked, so it can act as soon as the window opens.`
+      );
+    }
+
     const underTrigger = Math.max(
       0,
-      s.marketsScanned - s.skippedSpread - s.skippedPrice - s.skippedWarmup - s.skippedCooldown,
+      s.marketsScanned -
+        s.skippedSpread -
+        s.skippedPrice -
+        s.skippedWarmup -
+        s.skippedCooldown -
+        s.skippedClock,
     );
     const causes = [
       {
@@ -356,6 +412,11 @@ export class TradingEngine {
   }
 
   private scanForEntries(markets: KalshiMarket[], began: number): void {
+    // Outside the configured hours the scanner still tracks prices, so that
+    // momentum history is warm the moment the window opens again — it just
+    // will not buy anything.
+    const clockAllows = this.withinTradingHours();
+
     const stats: ScannerStats = {
       marketsScanned: markets.length,
       tracked: 0,
@@ -364,6 +425,7 @@ export class TradingEngine {
       skippedPrice: 0,
       skippedWarmup: 0,
       skippedCooldown: 0,
+      skippedClock: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
@@ -384,7 +446,12 @@ export class TradingEngine {
       let eligible = false;
       let reason: string;
 
-      if (m.yes_ask < this.settings.minPriceCents || m.yes_ask > this.settings.maxPriceCents) {
+      if (!clockAllows) {
+        // Checked first so that outside the window every market says the same
+        // thing, rather than the real reason hiding behind a spread complaint.
+        reason = `outside trading hours (${this.settings.tradingStartHour}:00–${this.settings.tradingEndHour}:00)`;
+        stats.skippedClock++;
+      } else if (m.yes_ask < this.settings.minPriceCents || m.yes_ask > this.settings.maxPriceCents) {
         reason = `price ${m.yes_ask}c outside ${this.settings.minPriceCents}–${this.settings.maxPriceCents}c`;
         stats.skippedPrice++;
       } else if (spread > this.settings.maxSpreadCents) {
@@ -475,6 +542,12 @@ export class TradingEngine {
       `OPEN ${m.ticker} — ${contracts}x YES @ ${m.yes_ask}c ` +
         `(${money(costUsd)}) [${m.title.slice(0, 60)}]`,
     );
+    this.emitEvent({
+      kind: "opened",
+      tone: "info",
+      title: `Opened ${m.ticker}`,
+      body: `${contracts} contracts at ${m.yes_ask}c · ${money(costUsd)}`,
+    });
   }
 
   private closePosition(p: Position, reason: string): void {
@@ -516,6 +589,42 @@ export class TradingEngine {
       `CLOSE ${p.ticker} — ${p.contracts}x @ ${p.currentBidCents}c ` +
         `(${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)}, ${reason})`,
     );
+    this.emitEvent({
+      kind: "closed",
+      tone: pnlUsd >= 0 ? "good" : "bad",
+      title: `${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)} · ${reason}`,
+      body: `${p.ticker} — ${p.contracts} contracts at ${p.currentBidCents}c`,
+    });
+  }
+
+  /**
+   * Four losses in a row is not variance you should sit through unattended;
+   * either the market changed shape or the settings are wrong. Counts back
+   * from the newest trade and stops at the first win.
+   */
+  private enforceLosingStreak(): void {
+    const limit = this.settings.maxConsecutiveLosses;
+    if (limit <= 0 || this.status !== "running") return;
+
+    let streak = 0;
+    for (const t of [...loadHistory()].reverse()) {
+      if (t.pnlUsd >= 0) break;
+      streak += 1;
+      if (streak >= limit) break;
+    }
+    if (streak < limit) return;
+
+    this.haltedReason =
+      `${streak} losing trades in a row. Engine stopped itself. ` +
+      `Review the strategy, then raise or clear the limit in Settings to resume.`;
+    this.log("warn", this.haltedReason);
+    this.emitEvent({
+      kind: "halted",
+      tone: "bad",
+      title: "ROM Trader stopped itself",
+      body: `${streak} losing trades in a row.`,
+    });
+    this.stop();
   }
 
   private log(level: LogLine["level"], msg: string): void {
@@ -538,6 +647,16 @@ export class TradingEngine {
         l.onState(s);
       } catch {
         // as above — notifying is best-effort, never load-bearing
+      }
+    }
+  }
+
+  private emitEvent(e: EngineEvent): void {
+    for (const l of this.listeners) {
+      try {
+        l.onEvent?.(e);
+      } catch {
+        // a failed toast must never interrupt trading
       }
     }
   }

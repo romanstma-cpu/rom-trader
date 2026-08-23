@@ -129,6 +129,13 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             min={0}
             onChange={(v) => update({ dailyLossLimitUsd: v })}
           />
+          <NumberField
+            label="Stop after losses in a row"
+            help="A losing streak usually means the market changed shape or the settings are wrong. 0 disables it."
+            value={settings.maxConsecutiveLosses}
+            min={0}
+            onChange={(v) => update({ maxConsecutiveLosses: v })}
+          />
         </div>
         <div className="callout">
           At these settings a stopped-out trade loses about{" "}
@@ -190,6 +197,59 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             Your take-profit is not larger than your stop, so you need to win well over half your
             trades just to break even before fees.
           </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <div className="label">Trading hours</div>
+          <span className="hint">When it is allowed to open anything</span>
+        </div>
+        <Toggle
+          label="Only open positions during set hours"
+          help="Prices are still tracked outside the window, so momentum history is warm when it opens. Positions already open are still managed to their exit — it will not abandon one at the bell."
+          checked={settings.tradingHoursEnabled}
+          onChange={(v) => update({ tradingHoursEnabled: v })}
+        />
+        {settings.tradingHoursEnabled && (
+          <>
+            <div className="field-grid">
+              <NumberField
+                label="From"
+                suffix=":00"
+                help="Local time, 24-hour."
+                value={settings.tradingStartHour}
+                min={0}
+                max={23}
+                onChange={(v) => update({ tradingStartHour: v })}
+              />
+              <NumberField
+                label="Until"
+                suffix=":00"
+                help="Set this earlier than the start for an overnight window."
+                value={settings.tradingEndHour}
+                min={0}
+                max={23}
+                onChange={(v) => update({ tradingEndHour: v })}
+              />
+            </div>
+            <div className="callout">
+              {settings.tradingStartHour === settings.tradingEndHour ? (
+                <>Start and end are the same hour, so the window is ignored and it trades all day.</>
+              ) : settings.tradingStartHour < settings.tradingEndHour ? (
+                <>
+                  Entries allowed between <strong>{settings.tradingStartHour}:00</strong> and{" "}
+                  <strong>{settings.tradingEndHour}:00</strong> each day.
+                </>
+              ) : (
+                <>
+                  Overnight window: entries allowed from{" "}
+                  <strong>{settings.tradingStartHour}:00</strong> through midnight until{" "}
+                  <strong>{settings.tradingEndHour}:00</strong> the next morning.
+                </>
+              )}
+            </div>
+          </>
         )}
       </div>
 
@@ -308,6 +368,18 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
               help="Open to the taskbar instead of the foreground."
               checked={appState.startMinimized}
               onChange={(v) => setApp({ startMinimized: v })}
+            />
+            <Toggle
+              label="Keep running in the tray when closed"
+              help="Closing the window leaves the engine trading in the background. Reopen it from the tray icon, which is also where Stop and Close all positions live."
+              checked={appState.closeToTray}
+              onChange={(v) => setApp({ closeToTray: v })}
+            />
+            <Toggle
+              label="Desktop notifications"
+              help="A Windows toast when a position opens or closes, and whenever the engine stops itself. Only the halts make a sound."
+              checked={appState.notifications}
+              onChange={(v) => setApp({ notifications: v })}
             />
           </>
         )}

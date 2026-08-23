@@ -145,6 +145,12 @@ export default function Dashboard({
                 <span className="k">Cooling down</span>
                 <span className="v">{state.scanner.skippedCooldown}</span>
               </div>
+              {state.scanner.skippedClock > 0 && (
+                <div>
+                  <span className="k">Outside hours</span>
+                  <span className="v">{state.scanner.skippedClock}</span>
+                </div>
+              )}
               <div>
                 <span className="k">Scan time</span>
                 <span className="v">{state.scanner.scanMs}ms</span>

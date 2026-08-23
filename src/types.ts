@@ -31,6 +31,7 @@ export interface ScannerStats {
   skippedPrice: number;
   skippedWarmup: number;
   skippedCooldown: number;
+  skippedClock: number;
   scanMs: number;
 }
 
@@ -77,6 +78,10 @@ export interface Settings {
   maxPriceCents: number;
   dailyLossLimitUsd: number;
   reentryCooldownSeconds: number;
+  maxConsecutiveLosses: number;
+  tradingHoursEnabled: boolean;
+  tradingStartHour: number;
+  tradingEndHour: number;
 }
 
 export interface CredentialStatus {
@@ -107,6 +112,8 @@ export interface AppSettings {
   disclaimerAccepted: boolean;
   startMinimized: boolean;
   startWithWindows: boolean;
+  notifications: boolean;
+  closeToTray: boolean;
 }
 
 export interface TradeRecord {

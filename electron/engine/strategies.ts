@@ -6,7 +6,11 @@ export interface Strategy {
   tagline: string;
   detail: string;
   risk: "low" | "medium" | "high";
-  /** Only the engine knobs — keys, live mode and paper cash are never touched. */
+  /**
+   * Only the engine knobs — keys, live mode and paper cash are never touched.
+   * Trading hours are deliberately absent too: when someone is willing to let
+   * the bot trade is a fact about them, not about the strategy.
+   */
   params: Pick<
     Settings,
     | "tradeSizeUsd"
@@ -20,6 +24,7 @@ export interface Strategy {
     | "maxPriceCents"
     | "dailyLossLimitUsd"
     | "reentryCooldownSeconds"
+    | "maxConsecutiveLosses"
   >;
 }
 
@@ -52,6 +57,8 @@ export const STRATEGIES: Strategy[] = [
       maxPriceCents: 85,
       dailyLossLimitUsd: 25,
       reentryCooldownSeconds: 180,
+      // Few trades, so a run of losses is a real signal rather than noise.
+      maxConsecutiveLosses: 3,
     },
   },
   {
@@ -75,6 +82,7 @@ export const STRATEGIES: Strategy[] = [
       maxPriceCents: 90,
       dailyLossLimitUsd: 50,
       reentryCooldownSeconds: 90,
+      maxConsecutiveLosses: 4,
     },
   },
   {
@@ -98,6 +106,8 @@ export const STRATEGIES: Strategy[] = [
       maxPriceCents: 85,
       dailyLossLimitUsd: 40,
       reentryCooldownSeconds: 30,
+      // Many small trades, so short losing runs are ordinary variance.
+      maxConsecutiveLosses: 6,
     },
   },
 ];
