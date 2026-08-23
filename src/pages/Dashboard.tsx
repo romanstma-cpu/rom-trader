@@ -10,6 +10,9 @@ export default function Dashboard({
   onNavigate: (page: string) => void;
 }) {
   const [equity, setEquity] = useState<EquityPoint[]>([]);
+  const [accountUsd, setAccountUsd] = useState<number | null>(null);
+
+  const live = state ? state.authConfigured && !state.dryRun : false;
 
   useEffect(() => {
     const load = () => void window.rom.equity.get().then(setEquity);
@@ -17,6 +20,19 @@ export default function Dashboard({
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
+
+  // The real Kalshi balance, polled only once live orders are actually
+  // possible — in dry-run there is nothing at the exchange to report.
+  useEffect(() => {
+    if (!live) {
+      setAccountUsd(null);
+      return;
+    }
+    const load = () => void window.rom.kalshi.balance().then(setAccountUsd);
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [live]);
 
   if (!state) return <div className="empty">Loading…</div>;
 
@@ -50,9 +66,15 @@ export default function Dashboard({
 
       <div className="grid stats">
         <Stat
-          label="Total Balance"
-          value={money(state.equityUsd)}
-          hint={`cash ${money(state.cashUsd)} · ${state.dryRun ? "paper" : "live"}`}
+          label={live ? "Kalshi Balance" : "Total Balance"}
+          value={live ? (accountUsd === null ? "—" : money(accountUsd)) : money(state.equityUsd)}
+          hint={
+            live
+              ? accountUsd === null
+                ? "couldn't reach Kalshi — check Connection"
+                : `settled at the exchange · engine equity ${money(state.equityUsd)}`
+              : `cash ${money(state.cashUsd)} · paper`
+          }
         />
         <Stat
           label="Session P&L"

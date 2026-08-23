@@ -41,6 +41,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [update, setUpdate] = useState<UpdateState | null>(null);
+  const [accountUsd, setAccountUsd] = useState<number | null>(null);
   const [confirmFlatten, setConfirmFlatten] = useState(false);
   const toast = useToast();
 
@@ -58,16 +59,24 @@ export default function App() {
     const offMax = window.rom.window.onMaximizeChange(setMaximized);
     const offUpdate = window.rom.update.onState(setUpdate);
     const poll = setInterval(() => void refresh(), 5000);
+    const bal = setInterval(() => {
+      void window.rom.engine.getState().then((s) => {
+        if (s.authConfigured && !s.dryRun) void window.rom.kalshi.balance().then(setAccountUsd);
+        else setAccountUsd(null);
+      });
+    }, 30000);
     return () => {
       offState();
       offMax();
       offUpdate();
       clearInterval(poll);
+      clearInterval(bal);
     };
   }, [refresh]);
 
   const running = state?.status === "running";
   const positions = state?.positions.length ?? 0;
+  const live = state ? state.authConfigured && !state.dryRun : false;
 
   async function toggleEngine() {
     setBusy(true);
@@ -163,7 +172,9 @@ export default function App() {
                   {state?.dryRun ? "PAPER" : "LIVE"}
                 </span>
               </div>
-              <div className="wallet-value">{money(state?.equityUsd ?? 0)}</div>
+              <div className="wallet-value">
+                {live && accountUsd !== null ? money(accountUsd) : money(state?.equityUsd ?? 0)}
+              </div>
               <div className="wallet-sub">
                 cash {money(state?.cashUsd ?? 0)} · {positions} open
               </div>
