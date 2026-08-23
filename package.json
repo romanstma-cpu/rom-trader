@@ -5,6 +5,18 @@
   "description": "A simple Kalshi auto-trading bot. Momentum engine, live dashboard, trade history.",
   "main": "dist-electron/main.js",
   "license": "MIT",
+  "author": {
+    "name": "ROM",
+    "url": "https://romapps.xyz"
+  },
+  "homepage": "https://romapps.xyz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/romanstma-cpu/rom-trader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/romanstma-cpu/rom-trader/issues"
+  },
   "scripts": {
     "build:renderer": "vite build",
     "build:main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --external:electron --outdir=dist-electron --format=cjs",
