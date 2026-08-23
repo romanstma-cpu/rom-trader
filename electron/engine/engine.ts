@@ -1,6 +1,7 @@
 import type { Credentials } from "./credentials";
 import { KalshiClient, KalshiMarket } from "./kalshi";
 import {
+  EquityPoint,
   Settings,
   TradeRecord,
   appendEquity,
@@ -90,6 +91,37 @@ export interface EngineEvent {
   tone: "good" | "bad" | "info";
 }
 
+/**
+ * Where results are kept.
+ *
+ * Injected so a backtest can run the engine's real rules against an in-memory
+ * ledger instead of the user's trade history. Reimplementing the rules for
+ * replay would produce a backtest that slowly stops describing the live bot,
+ * which is worse than having none.
+ */
+export interface EngineStore {
+  loadHistory(): TradeRecord[];
+  appendHistory(t: TradeRecord): void;
+  appendEquity(p: EquityPoint): void;
+}
+
+const LIVE_STORE: EngineStore = {
+  loadHistory,
+  appendHistory,
+  appendEquity,
+};
+
+/** A ledger that exists only for the duration of a replay. */
+export function memoryStore(): EngineStore {
+  const history: TradeRecord[] = [];
+  const equity: EquityPoint[] = [];
+  return {
+    loadHistory: () => history,
+    appendHistory: (t) => void history.push(t),
+    appendEquity: (p) => void equity.push(p),
+  };
+}
+
 type Listener = {
   onState: (s: EngineState) => void;
   onLog: (l: LogLine) => void;
@@ -106,6 +138,9 @@ type Listener = {
  */
 export class TradingEngine {
   private settings: Settings;
+  private store: EngineStore;
+  /** Set by main; left unset in tests and replays so nothing touches disk. */
+  private record: ((m: KalshiMarket[]) => void) | null = null;
   private client: KalshiClient;
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
@@ -133,14 +168,30 @@ export class TradingEngine {
   // Credentials are passed in rather than read from settings: they live in an
   // encrypted vault the engine has no business touching, and injecting them
   // keeps this class runnable headless in tests.
-  constructor(settings: Settings, credentials: Credentials = { apiKeyId: "", apiPrivateKeyPem: "" }) {
+  constructor(
+    settings: Settings,
+    credentials: Credentials = { apiKeyId: "", apiPrivateKeyPem: "" },
+    store: EngineStore = LIVE_STORE,
+  ) {
     this.settings = settings;
+    this.store = store;
     this.client = new KalshiClient(credentials.apiKeyId, credentials.apiPrivateKeyPem);
     this.cashUsd = settings.dryRunCash;
   }
 
   subscribe(l: Listener): void {
     this.listeners.push(l);
+  }
+
+  /**
+   * Where to send each live market sweep for later replay.
+   *
+   * Injected rather than imported so the engine keeps no opinion about disk,
+   * and so a backtest driving this same class cannot record its own replay
+   * back over the source data.
+   */
+  setRecorder(fn: ((m: KalshiMarket[]) => void) | null): void {
+    this.record = fn;
   }
 
   /** Swaps the signing key in place; omit to leave the current one alone. */
@@ -179,7 +230,7 @@ export class TradingEngine {
   }
 
   getState(): EngineState {
-    const history = loadHistory();
+    const history = this.store.loadHistory();
     const allTime = history.reduce((sum, t) => sum + t.pnlUsd, 0);
     const wins = history.filter((t) => t.pnlUsd > 0).length;
     const losses = history.filter((t) => t.pnlUsd < 0).length;
@@ -269,11 +320,14 @@ export class TradingEngine {
       const markets = await this.client.getActiveMarkets(40);
       this.lastTickAt = Date.now();
       this.lastError = null;
+      // Recorded before any decision is made, so a replay sees exactly what
+      // this tick saw. Only for live sweeps — a replay must not record itself.
+      this.record?.(markets);
       this.updatePositions(markets);
       this.scanForEntries(markets, began);
       this.enforceDailyLossLimit();
       this.enforceLosingStreak();
-      appendEquity({ ts: Date.now(), equityUsd: round2(this.equity()) });
+      this.store.appendEquity({ ts: Date.now(), equityUsd: round2(this.equity()) });
       this.emitState();
     } catch (e) {
       this.lastError = (e as Error).message;
@@ -291,7 +345,7 @@ export class TradingEngine {
   private enforceDailyLossLimit(): void {
     const limit = this.settings.dailyLossLimitUsd;
     if (limit <= 0 || this.status !== "running") return;
-    const today = this.todayPnl(loadHistory());
+    const today = this.todayPnl(this.store.loadHistory());
     if (today > -limit) return;
     this.haltedReason =
       `Daily loss limit hit (${money(today)} today, limit ${money(-limit)}). ` +
@@ -580,7 +634,7 @@ export class TradingEngine {
       dryRun: !this.isLive,
     };
     try {
-      appendHistory(rec);
+      this.store.appendHistory(rec);
     } catch (e) {
       this.log("error", `Trade closed but could not be saved: ${(e as Error).message}`);
     }
@@ -607,7 +661,7 @@ export class TradingEngine {
     if (limit <= 0 || this.status !== "running") return;
 
     let streak = 0;
-    for (const t of [...loadHistory()].reverse()) {
+    for (const t of [...this.store.loadHistory()].reverse()) {
       if (t.pnlUsd >= 0) break;
       streak += 1;
       if (streak >= limit) break;

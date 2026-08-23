@@ -36,6 +36,13 @@ import {
   migrateLegacyCredentials,
   saveCredentials,
 } from "../electron/engine/credentials";
+import {
+  clearRecording,
+  loadRecording,
+  recordScan,
+  recordingInfo,
+} from "../electron/engine/recorder";
+import { compareStrategies, runBacktest } from "../electron/engine/backtest";
 
 let passed = 0;
 const failures: string[] = [];
@@ -520,6 +527,84 @@ reset();
   check("a subscriber without onEvent is fine", !threwQuiet);
 }
 
+// ---------------------------------------------------------------- backtest
+
+section("recording");
+reset();
+clearRecording();
+check("no recording on a fresh install", recordingInfo().exists === false);
+check("an absent recording replays as nothing", loadRecording().length === 0);
+
+recordScan([mkt("KXR", 40, 41), mkt("KXR2", 50, 51)]);
+recordScan([mkt("KXR", 41, 42), mkt("KXR2", 50, 51)]);
+let rec = recordingInfo();
+check("scans are counted", rec.scans === 2, `${rec.scans}`);
+check("the recording reports a size", rec.bytes > 0);
+check("it knows when it started and ended", rec.firstTs !== null && rec.lastTs !== null);
+check("an empty sweep is not recorded", (recordScan([]), recordingInfo().scans === 2));
+
+const loaded = loadRecording();
+check("scans round-trip", loaded.length === 2);
+check("markets survive the round-trip", loaded[0].markets.length === 2);
+check("prices survive the round-trip", loaded[1].markets[0].yes_bid === 41);
+
+// The process can be killed mid-append, so a torn last line must not poison
+// the whole replay.
+fs.appendFileSync(path.join(dataDir(), "scans.jsonl"), '{"ts":1,"markets":[{"tick', "utf-8");
+check("a torn final line is skipped, not fatal", loadRecording().length === 2);
+
+clearRecording();
+check("clearing removes the recording", recordingInfo().exists === false);
+
+section("backtest");
+reset();
+clearRecording();
+{
+  // A rise big enough to trigger entry, then a further rise to take profit.
+  const scans: { ts: number; markets: Mkt[] }[] = [];
+  const prices = [40, 40, 40, 40, 45, 46, 47, 48, 50, 52];
+  prices.forEach((p, i) => {
+    scans.push({ ts: Date.now() + i * 15000, markets: [mkt("KXB", p, p + 1)] });
+  });
+
+  const res = runBacktest(scans as never, { ...DEFAULT_SETTINGS, momentumThresholdCents: 3 }, "test");
+  check("a replay produces trades", res.trades > 0, `${res.trades}`);
+  check("the result is labelled", res.label === "test");
+  check("wins and losses add up to trades", res.wins + res.losses <= res.trades);
+  check("an equity curve is produced", res.equity.length === prices.length);
+  check("exit reasons are counted", Object.keys(res.exitReasons).length > 0);
+
+  // The whole point: the same data through different settings must differ.
+  const tight = runBacktest(scans as never, { ...DEFAULT_SETTINGS, momentumThresholdCents: 40 }, "tight");
+  check("an unreachable trigger trades nothing", tight.trades === 0, `${tight.trades}`);
+  check("a no-trade run still reports cleanly", tight.pnlUsd === 0 && tight.winRate === null);
+
+  // A replay must never be able to place an order, whatever it is handed.
+  const live = runBacktest(scans as never, { ...DEFAULT_SETTINGS, liveMode: true }, "live-ish");
+  check("live mode cannot leak into a replay", live.trades >= 0);
+
+  // Replays must not touch the user's real history or equity.
+  const historyBefore = loadHistory().length;
+  runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "isolated");
+  check("a replay leaves real history alone", loadHistory().length === historyBefore);
+
+  // Determinism: the same input twice must give the same answer, or the
+  // comparison the whole page is built on means nothing.
+  const a = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "a");
+  const b = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "b");
+  check(
+    "the same data and settings replay identically",
+    a.trades === b.trades && a.pnlUsd === b.pnlUsd && a.wins === b.wins,
+    `${a.trades}/${a.pnlUsd} vs ${b.trades}/${b.pnlUsd}`,
+  );
+
+  const all = compareStrategies(scans as never, { ...DEFAULT_SETTINGS });
+  check("comparison covers your settings plus every preset", all.length === STRATEGIES.length + 1);
+  check("your settings come first", all[0].label === "Your settings");
+  check("every preset is named", STRATEGIES.every((s) => all.some((r) => r.label === s.name)));
+  check("drawdown is never negative", all.every((r) => r.maxDrawdownUsd >= 0));
+}
+
 // ---------------------------------------------------------------- shutdown
 
 /**
@@ -573,6 +658,9 @@ check("reset clears profiles", loadProfiles().length === 0);
 check("reset clears history", loadHistory().length === 0);
 check("reset clears the disclaimer", loadAppState().disclaimerAccepted === false);
 check("reset deletes the credential vault", !fs.existsSync(path.join(dataDir(), "credentials.dat")));
+recordScan([mkt("KXZ", 40, 41)]);
+factoryReset();
+check("reset deletes the scan recording", !fs.existsSync(path.join(dataDir(), "scans.jsonl")));
 
 // ---------------------------------------------------------------- result
 

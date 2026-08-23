@@ -5,6 +5,7 @@ import Positions from "./pages/Positions";
 import Signals from "./pages/Signals";
 import History from "./pages/History";
 import Strategies from "./pages/Strategies";
+import Backtest from "./pages/Backtest";
 import Connection from "./pages/Connection";
 import SettingsPage from "./pages/Settings";
 import Logs from "./pages/Logs";
@@ -18,6 +19,7 @@ type Page =
   | "signals"
   | "history"
   | "strategies"
+  | "backtest"
   | "connection"
   | "settings"
   | "logs";
@@ -28,6 +30,7 @@ const NAV: { id: Page; icon: string; label: string }[] = [
   { id: "signals", icon: "∿", label: "Signals" },
   { id: "history", icon: "◷", label: "History" },
   { id: "strategies", icon: "◆", label: "Strategies" },
+  { id: "backtest", icon: "⟲", label: "Backtest" },
   { id: "connection", icon: "⚿", label: "Connection" },
   { id: "settings", icon: "⚙", label: "Settings" },
   { id: "logs", icon: "≡", label: "Logs" },
@@ -240,6 +243,7 @@ export default function App() {
             {page === "signals" && <Signals running={running} idleHint={state?.idleHint ?? null} />}
             {page === "history" && <History onChanged={refresh} />}
             {page === "strategies" && <Strategies />}
+            {page === "backtest" && <Backtest />}
             {page === "connection" && <Connection onChanged={refresh} />}
             {page === "settings" && <SettingsPage onChanged={refresh} />}
             {page === "logs" && <Logs />}

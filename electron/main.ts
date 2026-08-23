@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { installCrashHandlers, reportFatal } from "./crashlog";
 import { checkForUpdates, getUpdateState, initUpdater, installUpdate } from "./updater";
+import { compareStrategies } from "./engine/backtest";
 import { type EngineEvent, TradingEngine } from "./engine/engine";
+import { clearRecording, loadRecording, recordScan, recordingInfo } from "./engine/recorder";
 import {
   clearCredentials,
   credentialStatus,
@@ -298,6 +300,22 @@ function registerIpc(): void {
     }
   });
 
+  ipcMain.handle("backtest:info", () => recordingInfo());
+  ipcMain.handle("backtest:run", () => {
+    const scans = loadRecording();
+    if (scans.length < 10) {
+      throw new Error(
+        `Only ${scans.length} recorded scans so far. Leave the engine running for a while — ` +
+          `a replay over a handful of sweeps says nothing.`,
+      );
+    }
+    return compareStrategies(scans, loadSettings());
+  });
+  ipcMain.handle("backtest:clear", () => {
+    clearRecording();
+    return recordingInfo();
+  });
+
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:dataDir", () => dataDir());
   ipcMain.handle("app:openDataFolder", () => shell.openPath(dataDir()));
@@ -358,6 +376,9 @@ if (!app.requestSingleInstanceLock()) {
       }
 
       engine = new TradingEngine(loadSettings(), loadCredentials());
+      // Every live sweep is kept so strategies can be compared on real data
+      // later instead of on argument.
+      engine.setRecorder(recordScan);
       engine.subscribe({
         onState: (s) => {
           sendToRenderer("engine:state", s);

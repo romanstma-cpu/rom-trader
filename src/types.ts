@@ -166,6 +166,30 @@ export interface UpdateState {
   checkedAt: number | null;
 }
 
+export interface RecordingInfo {
+  exists: boolean;
+  scans: number;
+  bytes: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+export interface BacktestResult {
+  label: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  pnlUsd: number;
+  maxDrawdownUsd: number;
+  bestUsd: number;
+  worstUsd: number;
+  halted: boolean;
+  haltedReason: string | null;
+  equity: { ts: number; equityUsd: number }[];
+  exitReasons: Record<string, number>;
+}
+
 export interface InstallRefusal {
   installed: false;
   reason: string;
@@ -211,6 +235,11 @@ export interface RomApi {
   kalshi: {
     test: () => Promise<TestResult>;
     balance: () => Promise<number | null>;
+  };
+  backtest: {
+    info: () => Promise<RecordingInfo>;
+    run: () => Promise<BacktestResult[]>;
+    clear: () => Promise<RecordingInfo>;
   };
   app: {
     version: () => Promise<string>;

@@ -244,6 +244,7 @@ export function factoryReset(): void {
     "equity.json",
     "app-state.json",
     "credentials.dat",
+    "scans.jsonl",
   ]) {
     try {
       const p = path.join(dataDir(), f);

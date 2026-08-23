@@ -49,6 +49,11 @@ const api = {
     test: () => ipcRenderer.invoke("kalshi:test"),
     balance: () => ipcRenderer.invoke("kalshi:balance"),
   },
+  backtest: {
+    info: () => ipcRenderer.invoke("backtest:info"),
+    run: () => ipcRenderer.invoke("backtest:run"),
+    clear: () => ipcRenderer.invoke("backtest:clear"),
+  },
   app: {
     version: () => ipcRenderer.invoke("app:version"),
     dataDir: () => ipcRenderer.invoke("app:dataDir"),
