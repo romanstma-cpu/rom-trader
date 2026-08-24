@@ -6,10 +6,14 @@ import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
 import { computeMetrics } from "../../electron/engine/metrics";
 
 type Filter = "all" | "wins" | "losses";
+type Mode = "all" | "paper" | "live";
 
 export default function History({ onChanged }: { onChanged: () => void }) {
   const [rows, setRows] = useState<TradeRecord[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
+  // Paper and live are separate accounts of separate money; the stats above
+  // the table are meaningless when they are blended.
+  const [mode, setMode] = useState<Mode>("all");
   const [confirmClear, setConfirmClear] = useState(false);
   const toast = useToast();
 
@@ -17,30 +21,37 @@ export default function History({ onChanged }: { onChanged: () => void }) {
     void window.rom.history.get().then(setRows);
   }, []);
 
+  const scoped = useMemo(
+    () => (mode === "all" ? rows : rows.filter((r) => (mode === "paper" ? r.dryRun : !r.dryRun))),
+    [rows, mode],
+  );
+
   const stats = useMemo(() => {
-    const total = rows.reduce((s, r) => s + r.pnlUsd, 0);
-    const wins = rows.filter((r) => r.pnlUsd > 0);
-    const losses = rows.filter((r) => r.pnlUsd < 0);
-    const best = rows.reduce((m, r) => (r.pnlUsd > m ? r.pnlUsd : m), 0);
-    const worst = rows.reduce((m, r) => (r.pnlUsd < m ? r.pnlUsd : m), 0);
+    const total = scoped.reduce((s, r) => s + r.pnlUsd, 0);
+    const wins = scoped.filter((r) => r.pnlUsd > 0);
+    const losses = scoped.filter((r) => r.pnlUsd < 0);
+    const best = scoped.reduce((m, r) => (r.pnlUsd > m ? r.pnlUsd : m), 0);
+    const worst = scoped.reduce((m, r) => (r.pnlUsd < m ? r.pnlUsd : m), 0);
     const avgHoldMs =
-      rows.length > 0 ? rows.reduce((s, r) => s + (r.closedAt - r.openedAt), 0) / rows.length : 0;
+      scoped.length > 0
+        ? scoped.reduce((s, r) => s + (r.closedAt - r.openedAt), 0) / scoped.length
+        : 0;
     return { total, wins: wins.length, losses: losses.length, best, worst, avgHoldMs };
-  }, [rows]);
+  }, [scoped]);
 
   // No equity curve here: drawdown belongs to a session, and this page pools
   // trades across many. The per-trade numbers are what carry over.
-  const metrics = useMemo(() => computeMetrics(rows, []), [rows]);
+  const metrics = useMemo(() => computeMetrics(scoped, []), [scoped]);
 
   const shown = useMemo(() => {
     const f =
       filter === "wins"
-        ? rows.filter((r) => r.pnlUsd > 0)
+        ? scoped.filter((r) => r.pnlUsd > 0)
         : filter === "losses"
-          ? rows.filter((r) => r.pnlUsd < 0)
-          : rows;
+          ? scoped.filter((r) => r.pnlUsd < 0)
+          : scoped;
     return [...f].sort((a, b) => b.closedAt - a.closedAt);
-  }, [rows, filter]);
+  }, [scoped, filter]);
 
   async function doExport() {
     try {
@@ -54,9 +65,14 @@ export default function History({ onChanged }: { onChanged: () => void }) {
   async function doClear() {
     setConfirmClear(false);
     try {
-      setRows(await window.rom.history.clear());
+      setRows(await window.rom.history.clear(mode));
       onChanged();
-      toast("ok", "History and equity curve cleared.");
+      toast(
+        "ok",
+        mode === "all"
+          ? "History and equity curve cleared."
+          : `${mode === "paper" ? "Paper" : "Live"} trades cleared. The others were kept.`,
+      );
     } catch (e) {
       toast("bad", (e as Error).message);
     }
@@ -140,6 +156,13 @@ export default function History({ onChanged }: { onChanged: () => void }) {
 
       <div className="toolbar">
         <div className="segmented">
+          {(["all", "paper", "live"] as Mode[]).map((m) => (
+            <button key={m} className={mode === m ? "active" : ""} onClick={() => setMode(m)}>
+              {m === "all" ? "Both" : m === "paper" ? "Paper" : "Live"}
+            </button>
+          ))}
+        </div>
+        <div className="segmented">
           {(["all", "wins", "losses"] as Filter[]).map((f) => (
             <button
               key={f}
@@ -155,7 +178,7 @@ export default function History({ onChanged }: { onChanged: () => void }) {
           Export CSV
         </button>
         <button className="btn danger quiet" onClick={() => setConfirmClear(true)}>
-          Clear history
+          {mode === "all" ? "Clear history" : `Clear ${mode} trades`}
         </button>
       </div>
 
@@ -197,14 +220,23 @@ export default function History({ onChanged }: { onChanged: () => void }) {
 
       <Confirm
         open={confirmClear}
-        title="Clear all trade history?"
+        title={mode === "all" ? "Clear all trade history?" : `Clear ${mode} trades?`}
         body={
-          <>
-            This permanently deletes all {rows.length} recorded trades and resets the equity curve.
-            Export a CSV first if you want to keep them — this cannot be undone.
-          </>
+          mode === "all" ? (
+            <>
+              This permanently deletes all {rows.length} recorded trades and resets the equity
+              curve. Export a CSV first if you want to keep them — this cannot be undone.
+            </>
+          ) : (
+            <>
+              This permanently deletes the {scoped.length} {mode} trade
+              {scoped.length === 1 ? "" : "s"}. Your {mode === "paper" ? "live" : "paper"} trades
+              and the equity curve are kept. Export a CSV first if you want them — this cannot be
+              undone.
+            </>
+          )
         }
-        confirmLabel="Delete history"
+        confirmLabel={mode === "all" ? "Delete history" : `Delete ${mode} trades`}
         danger
         onConfirm={doClear}
         onCancel={() => setConfirmClear(false)}

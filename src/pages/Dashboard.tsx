@@ -51,7 +51,24 @@ export default function Dashboard({
           </button>
         </div>
       )}
-      {state.haltedReason && <div className="notice bad">{state.haltedReason}</div>}
+      {state.haltedReason && (
+        <div className="notice bad">
+          <div>{state.haltedReason}</div>
+          <button
+            className="btn tiny"
+            onClick={async () => {
+              try {
+                await window.rom.engine.clearHalt();
+              } catch {
+                // The banner is refreshed by engine state either way.
+              }
+            }}
+            title="Keeps your limits exactly as they are, and starts their allowance again from now."
+          >
+            Resume
+          </button>
+        </div>
+      )}
       {state.lastError && !state.haltedReason && (
         <div className="notice warn">Last scan error: {state.lastError}</div>
       )}
@@ -86,18 +103,22 @@ export default function Dashboard({
           label="Today"
           value={signedMoney(state.todayPnlUsd)}
           tone={pnlClass(state.todayPnlUsd)}
-          hint="closed trades since midnight"
+          hint={`closed ${live ? "live" : "paper"} trades since midnight`}
         />
         <Stat
           label="All-Time P&L"
           value={signedMoney(state.allTimePnlUsd)}
           tone={pnlClass(state.allTimePnlUsd)}
-          hint={`${state.wins}W / ${state.losses}L`}
+          hint={`${state.wins}W / ${state.losses}L · ${live ? "live" : "paper"} only`}
         />
         <Stat
           label="Win Rate"
           value={state.winRate === null ? "—" : `${(state.winRate * 100).toFixed(0)}%`}
-          hint={state.winRate === null ? "no closed trades" : `${state.wins + state.losses} trades`}
+          hint={
+            state.winRate === null
+              ? `no closed ${live ? "live" : "paper"} trades`
+              : `${state.wins + state.losses} ${live ? "live" : "paper"} trades`
+          }
         />
       </div>
 

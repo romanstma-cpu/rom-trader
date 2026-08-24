@@ -14,6 +14,7 @@ const api = {
     getState: () => ipcRenderer.invoke("engine:getState"),
     getLogs: () => ipcRenderer.invoke("engine:getLogs"),
     getSignals: () => ipcRenderer.invoke("engine:getSignals"),
+    clearHalt: () => ipcRenderer.invoke("engine:clearHalt"),
     onState: (cb: (s: unknown) => void) => on("engine:state", cb),
     onLog: (cb: (l: unknown) => void) => on("engine:log", cb),
   },
@@ -23,7 +24,7 @@ const api = {
   },
   history: {
     get: () => ipcRenderer.invoke("history:get"),
-    clear: () => ipcRenderer.invoke("history:clear"),
+    clear: (mode?: "all" | "paper" | "live") => ipcRenderer.invoke("history:clear", mode ?? "all"),
     export: () => ipcRenderer.invoke("history:export"),
   },
   equity: {
@@ -61,6 +62,7 @@ const api = {
     dataDir: () => ipcRenderer.invoke("app:dataDir"),
     openDataFolder: () => ipcRenderer.invoke("app:openDataFolder"),
     openMarket: (ticker: string) => ipcRenderer.invoke("app:openMarket", ticker),
+    resetTradingData: () => ipcRenderer.invoke("app:resetTradingData"),
     factoryReset: () => ipcRenderer.invoke("app:factoryReset"),
   },
   state: {

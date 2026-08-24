@@ -334,3 +334,59 @@ bid gate carries most of the improvement, the volume gate adds a little on
 top of it, and neither alone beats both. Maker entries stayed worse than
 taker on identical rules — the adverse-selection finding repeats. Still
 negative everywhere, still one night, still no edge claimed.
+
+---
+
+# 1.7.1: the brakes were holding the wrong ledger, and had no release
+
+Three defects, reported from actual use, all in the risk machinery rather
+than the strategy.
+
+## Paper losses were arming the live brakes
+
+`todayPnl()` and the losing-streak check read the whole trade history and
+filtered it by date alone — never by `dryRun`. Paper and live are separate
+accounts of separate money, and the engine was pooling them. A losing
+practice run therefore spent the *live* daily loss budget, and could halt
+live trading before it placed a single real order. The dashboard's
+all-time P&L, win/loss record and win rate blended the two the same way,
+reporting a history for an account that only ever held half of it.
+
+Every brake and every statistic now reads only the mode the engine is
+actually in, and the halt messages name which ledger they counted.
+
+## A tripped limit could not be released
+
+`start()` cleared the halt banner, and the first scan re-read the same
+history, saw the same losses, and halted again. From outside, the Start
+button did nothing. The documented escape — "raise or clear the limit in
+Settings" — meant either raising a limit past a loss already taken or
+deleting the trade history, which is a bad bargain: the record of what
+went wrong is exactly what is worth keeping after it goes wrong.
+
+Two changes. The engine now refuses to start with a message naming the way
+out, instead of starting and stopping in the same breath. And there is a
+**Resume** button that acknowledges the halt: the limit is not touched or
+weakened, but the line it measures from moves to now, so the allowance
+runs again from the moment the user chose to carry on. The acknowledgment
+persists across restarts, and a fresh loss past the limit halts again.
+
+## Settings silently restored the default it was told to replace
+
+Emptying a number field to type a new value produces `NaN`, and the
+settings sanitiser maps any non-finite number back to its factory default.
+So clearing "Daily loss limit" and pressing Save wrote **50** — the app
+appearing to refuse the change. Saving is now blocked while any box is
+empty, and the blocked fields are named.
+
+## And a reset that does not cost you your keys
+
+With the halt inescapable, "Reset everything" was the only way out, and it
+takes API keys, settings and saved setups with it. **Reset trading data**
+clears results — trade history, equity curve, and any self-imposed halt —
+while keeping keys, settings, saved setups and recorded market data. The
+History page can also clear just the paper trades or just the live ones.
+
+None of this changes a measurement in this document. It changes whether
+the safety features can be lived with, which is what decides if anyone
+leaves them switched on.

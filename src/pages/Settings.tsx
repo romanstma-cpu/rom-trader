@@ -11,12 +11,36 @@ import {
   takerFeeUsd,
 } from "../../electron/engine/fees";
 
+/** Field names as they read on screen, for the empty-box warning. */
+const FIELD_LABELS: Partial<Record<keyof Settings, string>> = {
+  tradeSizeUsd: "Trade size",
+  maxPositions: "Max open positions",
+  dryRunCash: "Paper cash",
+  dailyLossLimitUsd: "Daily loss limit",
+  maxConsecutiveLosses: "Stop after losses in a row",
+  maxDrawdownPct: "Max session drawdown",
+  momentumThresholdCents: "Momentum trigger",
+  takeProfitCents: "Take profit",
+  stopLossCents: "Stop loss",
+  tickSeconds: "Scan interval",
+  reentryCooldownSeconds: "Re-entry cooldown",
+  trailingStopCents: "Trailing stop",
+  minNetEdgeCents: "Min net edge",
+  makerTtlTicks: "Order lifetime",
+  maxSpreadCents: "Max spread",
+  minPriceCents: "Min price",
+  maxPriceCents: "Max price",
+  tradingStartHour: "From",
+  tradingEndHour: "Until",
+};
+
 export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [appState, setAppState] = useState<AppSettings | null>(null);
   const [dataDir, setDataDir] = useState("");
   const [dirty, setDirty] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [confirmTrading, setConfirmTrading] = useState(false);
   const [upd, setUpd] = useState<UpdateState | null>(null);
   const [installBlocked, setInstallBlocked] = useState<string | null>(null);
   const toast = useToast();
@@ -47,9 +71,35 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
     }
   }
 
+  /**
+   * Number fields that have been emptied out.
+   *
+   * An empty box is NaN, and the settings sanitiser turns a non-finite number
+   * back into its factory default — so clearing "Daily loss limit" to type a
+   * new one and hitting Save silently restored 50, which looked exactly like
+   * the app refusing to accept the change. Saving is blocked until the box has
+   * a number in it again.
+   */
+  const blanks = settings
+    ? (Object.keys(settings) as (keyof Settings)[]).filter(
+        (k) => typeof settings[k] === "number" && !Number.isFinite(settings[k] as number),
+      )
+    : [];
+
   async function setApp(patch: Partial<AppSettings>) {
     try {
       setAppState(await window.rom.state.set(patch));
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    }
+  }
+
+  async function doResetTrading() {
+    setConfirmTrading(false);
+    try {
+      await window.rom.app.resetTradingData();
+      onChanged();
+      toast("ok", "Trade history, equity curve and halts cleared. Keys and settings kept.");
     } catch (e) {
       toast("bad", (e as Error).message);
     }
@@ -428,10 +478,17 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
       </div>
 
       <div className="sticky-save">
-        <button className="btn primary" onClick={save} disabled={!dirty}>
+        <button className="btn primary" onClick={save} disabled={!dirty || blanks.length > 0}>
           {dirty ? "Save changes" : "All changes saved"}
         </button>
-        {dirty && <span className="hint">Unsaved changes</span>}
+        {blanks.length > 0 ? (
+          <span className="hint neg">
+            {blanks.map((k) => FIELD_LABELS[k] ?? k).join(", ")}{" "}
+            {blanks.length === 1 ? "is" : "are"} empty — type a number to save.
+          </span>
+        ) : (
+          dirty && <span className="hint">Unsaved changes</span>
+        )}
       </div>
 
       <div className="card">
@@ -531,9 +588,17 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           <button className="btn quiet" onClick={() => void window.rom.app.openDataFolder()}>
             Open data folder
           </button>
+          <button className="btn quiet" onClick={() => setConfirmTrading(true)}>
+            Reset trading data
+          </button>
           <button className="btn danger quiet" onClick={() => setConfirmReset(true)}>
             Reset everything
           </button>
+        </div>
+        <div className="field-help">
+          <strong>Reset trading data</strong> clears trade history, the equity curve and any
+          self-imposed halt — your API keys, settings, saved setups and recorded market data all
+          stay. <strong>Reset everything</strong> wipes the lot, keys included.
         </div>
         {dataDir && <div className="path-hint">{dataDir}</div>}
       </div>
@@ -562,6 +627,27 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           void install(true);
         }}
         onCancel={() => setInstallBlocked(null)}
+      />
+
+      <Confirm
+        open={confirmTrading}
+        title="Reset trading data?"
+        body={
+          <>
+            Clears your trade history, the equity curve, and any halt the engine has imposed on
+            itself.
+            <br />
+            <br />
+            <strong>Kept:</strong> API keys, all settings, saved setups, and recorded market data.
+            <br />
+            <br />
+            Export your history from the History page first if you want to keep it — this cannot be
+            undone.
+          </>
+        }
+        confirmLabel="Clear trading data"
+        onConfirm={doResetTrading}
+        onCancel={() => setConfirmTrading(false)}
       />
 
       <Confirm

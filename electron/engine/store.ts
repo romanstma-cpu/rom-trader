@@ -119,6 +119,27 @@ export interface EquityPoint {
   equityUsd: number;
 }
 
+/**
+ * What the safety brakes have already been told about.
+ *
+ * A daily loss limit that has tripped stays tripped: restarting the engine
+ * re-reads the same history, sees the same losses and halts again on the first
+ * scan. Before 1.7.1 the only ways out were raising the limit past a loss you
+ * had already taken or deleting your trade history, which is a bad trade to
+ * force on someone — the record of what went wrong is exactly what you want to
+ * keep after it goes wrong.
+ *
+ * Acknowledging is the way out instead. It does not disable the brake; it
+ * moves the line the brake measures from, so the allowance starts again from
+ * the moment you chose to carry on.
+ */
+export interface RiskState {
+  /** Trades closed at or before this are excluded from the brakes. 0 = none. */
+  acknowledgedAt: number;
+}
+
+export const DEFAULT_RISK_STATE: RiskState = { acknowledgedAt: 0 };
+
 export const DEFAULT_SETTINGS: Settings = {
   liveMode: false,
   dryRunCash: 100,
@@ -276,8 +297,37 @@ export function appendHistory(t: TradeRecord): TradeRecord[] {
   return all;
 }
 
-export function clearHistory(): void {
+/**
+ * Deletes trades, optionally only one mode's.
+ *
+ * Scoped because paper and live results are different claims about different
+ * money: clearing a practice run should never touch the record of what real
+ * orders did, and vice versa.
+ */
+export function clearHistory(mode: "all" | "paper" | "live" = "all"): TradeRecord[] {
+  const kept =
+    mode === "all" ? [] : loadHistory().filter((t) => (mode === "paper" ? !t.dryRun : t.dryRun));
+  writeJson("history.json", kept);
+  return kept;
+}
+
+export function loadRiskState(): RiskState {
+  return readJson<RiskState>("risk.json", DEFAULT_RISK_STATE);
+}
+
+export function saveRiskState(s: RiskState): void {
+  writeJson("risk.json", s);
+}
+
+/**
+ * Clears trading results without touching anything the user would have to set
+ * up again — API keys, settings, saved setups and recorded market data all
+ * survive. The heavy "reset everything" is still there for a genuine wipe.
+ */
+export function resetTradingData(): void {
   writeJson("history.json", []);
+  writeJson("equity.json", []);
+  saveRiskState(DEFAULT_RISK_STATE);
 }
 
 export function loadProfiles(): Profile[] {
@@ -326,6 +376,7 @@ export function factoryReset(): void {
     "app-state.json",
     "credentials.dat",
     "scans.jsonl",
+    "risk.json",
   ]) {
     try {
       const p = path.join(dataDir(), f);

@@ -7,12 +7,16 @@ import {
   takerFeeUsd,
 } from "./fees";
 import {
+  DEFAULT_RISK_STATE,
   EquityPoint,
+  RiskState,
   Settings,
   TradeRecord,
   appendEquity,
   appendHistory,
   loadHistory,
+  loadRiskState,
+  saveRiskState,
 } from "./store";
 
 export interface Position {
@@ -148,22 +152,31 @@ export interface EngineStore {
   loadHistory(): TradeRecord[];
   appendHistory(t: TradeRecord): void;
   appendEquity(p: EquityPoint): void;
+  loadRiskState(): RiskState;
+  saveRiskState(s: RiskState): void;
 }
 
 const LIVE_STORE: EngineStore = {
   loadHistory,
   appendHistory,
   appendEquity,
+  loadRiskState,
+  saveRiskState,
 };
 
 /** A ledger that exists only for the duration of a replay. */
 export function memoryStore(): EngineStore {
   const history: TradeRecord[] = [];
   const equity: EquityPoint[] = [];
+  let risk: RiskState = { ...DEFAULT_RISK_STATE };
   return {
     loadHistory: () => history,
     appendHistory: (t) => void history.push(t),
     appendEquity: (p) => void equity.push(p),
+    loadRiskState: () => risk,
+    saveRiskState: (s) => {
+      risk = s;
+    },
   };
 }
 
@@ -255,6 +268,11 @@ export class TradingEngine {
   /** Swaps the signing key in place; omit to leave the current one alone. */
   updateCredentials(c: Credentials): void {
     this.client = new KalshiClient(c.apiKeyId, c.apiPrivateKeyPem);
+    // Keys decide isLive, which decides which ledger the brakes read. A halt
+    // earned on paper must not follow the user into live trading.
+    if (this.haltedReason !== null && this.blockedByBrakes() === null) {
+      this.haltedReason = null;
+    }
     this.emitState();
   }
 
@@ -262,6 +280,12 @@ export class TradingEngine {
     const tickChanged = s.tickSeconds !== this.settings.tickSeconds;
     this.settings = s;
     if (this.status === "stopped") this.cashUsd = s.dryRunCash;
+    // Raising a limit is the user answering the halt, so the banner should go
+    // with it. Leaving it up after the cause is gone reads as "nothing I do
+    // works" — which is exactly what it was told to look like before 1.7.1.
+    if (this.haltedReason !== null && this.blockedByBrakes() === null) {
+      this.haltedReason = null;
+    }
     // A new poll interval has to replace the running timer or it never takes effect.
     if (tickChanged && this.status === "running" && this.timer) {
       clearInterval(this.timer);
@@ -279,6 +303,30 @@ export class TradingEngine {
     return this.signals;
   }
 
+  /**
+   * Trades belonging to the mode the engine is in right now.
+   *
+   * Paper and live are separate accounts of separate money, so they must not
+   * share a risk budget or a scoreboard. Before 1.7.1 they did: a losing
+   * practice run counted against the live daily loss limit and the live losing
+   * streak, so switching on live trading could find the brakes already pulled
+   * by trades that never touched the exchange — and the dashboard reported a
+   * blended record for an account that only held one of them.
+   */
+  private ownHistory(): TradeRecord[] {
+    const paper = !this.isLive;
+    return this.store.loadHistory().filter((t) => t.dryRun === paper);
+  }
+
+  /**
+   * Trades the brakes are allowed to count: this mode's, since the user last
+   * acknowledged a halt.
+   */
+  private brakeHistory(): TradeRecord[] {
+    const since = this.store.loadRiskState().acknowledgedAt;
+    return since > 0 ? this.ownHistory().filter((t) => t.closedAt > since) : this.ownHistory();
+  }
+
   private todayPnl(history: TradeRecord[]): number {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
@@ -288,7 +336,7 @@ export class TradingEngine {
   }
 
   getState(): EngineState {
-    const history = this.store.loadHistory();
+    const history = this.ownHistory();
     const allTime = history.reduce((sum, t) => sum + t.pnlUsd, 0);
     const wins = history.filter((t) => t.pnlUsd > 0).length;
     const losses = history.filter((t) => t.pnlUsd < 0).length;
@@ -332,8 +380,79 @@ export class TradingEngine {
     );
   }
 
+  /**
+   * Why starting right now would halt on the first scan, or null.
+   *
+   * Checked before starting rather than after: the brakes read history that
+   * already exists, so a halted engine used to clear its banner on Start and
+   * re-halt milliseconds later. From the outside that looked like the button
+   * doing nothing at all, which is how a safety feature turns into a bug
+   * report. Now the refusal happens up front and names the way out.
+   *
+   * The drawdown brake is absent on purpose: it measures from a session peak
+   * that starting resets, so it genuinely does clear on its own.
+   */
+  blockedByBrakes(): string | null {
+    const mode = this.isLive ? "live" : "paper";
+    const limit = this.settings.dailyLossLimitUsd;
+    if (limit > 0) {
+      const today = this.todayPnl(this.brakeHistory());
+      if (today <= -limit) {
+        return (
+          `Still ${money(today)} down in ${mode} today against a ${money(limit)} daily loss ` +
+          `limit, so the engine would stop again on its first scan. Press Resume to carry on ` +
+          `with a fresh allowance, or change the limit in Settings.`
+        );
+      }
+    }
+
+    const streakLimit = this.settings.maxConsecutiveLosses;
+    if (streakLimit > 0) {
+      let streak = 0;
+      for (const t of [...this.brakeHistory()].reverse()) {
+        if (t.pnlUsd >= 0) break;
+        streak += 1;
+        if (streak >= streakLimit) break;
+      }
+      if (streak >= streakLimit) {
+        return (
+          `The last ${streak} ${mode} trades all lost, which is the limit you set, so the ` +
+          `engine would stop again on its first scan. Press Resume to carry on, or change the ` +
+          `limit in Settings.`
+        );
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Acknowledges a halt so trading can continue.
+   *
+   * Deliberately not the same as switching the brake off. The limit stays
+   * exactly where it was; what moves is the line it measures from, so the
+   * allowance runs again from this moment rather than from a loss already
+   * taken. That keeps the protection intact for whatever happens next.
+   */
+  clearHalt(): void {
+    this.store.saveRiskState({ acknowledgedAt: Date.now() });
+    this.haltedReason = null;
+    this.log(
+      "info",
+      "Halt acknowledged — the brakes now measure from here, with their limits unchanged.",
+    );
+    this.emitState();
+  }
+
   start(): void {
     if (this.status === "running") return;
+    // Refuse rather than start-then-instantly-stop; see blockedByBrakes().
+    const blocked = this.blockedByBrakes();
+    if (blocked) {
+      this.haltedReason = blocked;
+      this.log("warn", blocked);
+      this.emitState();
+      return;
+    }
     this.status = "running";
     this.lastError = null;
     this.haltedReason = null;
@@ -424,11 +543,12 @@ export class TradingEngine {
   private enforceDailyLossLimit(): void {
     const limit = this.settings.dailyLossLimitUsd;
     if (limit <= 0 || this.status !== "running") return;
-    const today = this.todayPnl(this.store.loadHistory());
+    const today = this.todayPnl(this.brakeHistory());
     if (today > -limit) return;
     this.haltedReason =
-      `Daily loss limit hit (${money(today)} today, limit ${money(-limit)}). ` +
-      `Engine stopped itself. Raise or clear the limit in Settings to resume.`;
+      `Daily loss limit hit (${money(today)} ${this.isLive ? "live" : "paper"} today, ` +
+      `limit ${money(-limit)}). Engine stopped itself. Press Resume to carry on with a fresh ` +
+      `allowance, or change the limit in Settings.`;
     this.log("warn", this.haltedReason);
     this.emitEvent({
       kind: "halted",
@@ -1055,7 +1175,7 @@ export class TradingEngine {
     if (limit <= 0 || this.status !== "running") return;
 
     let streak = 0;
-    for (const t of [...this.store.loadHistory()].reverse()) {
+    for (const t of [...this.brakeHistory()].reverse()) {
       if (t.pnlUsd >= 0) break;
       streak += 1;
       if (streak >= limit) break;
@@ -1063,8 +1183,8 @@ export class TradingEngine {
     if (streak < limit) return;
 
     this.haltedReason =
-      `${streak} losing trades in a row. Engine stopped itself. ` +
-      `Review the strategy, then raise or clear the limit in Settings to resume.`;
+      `${streak} losing ${this.isLive ? "live" : "paper"} trades in a row. Engine stopped itself. ` +
+      `Review the strategy, then press Resume to carry on or change the limit in Settings.`;
     this.log("warn", this.haltedReason);
     this.emitEvent({
       kind: "halted",

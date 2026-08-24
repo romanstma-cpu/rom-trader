@@ -21,9 +21,11 @@ import {
   factoryReset,
   historyToCsv,
   loadAppState,
+  loadEquity,
   loadHistory,
   loadProfiles,
   loadSettings,
+  resetTradingData,
   saveAppState,
   saveProfile,
   saveSettings,
@@ -469,7 +471,12 @@ reset();
   check("four losses in a row halts the engine", e.getState().status === "stopped");
   check(
     "the halt says why",
-    (e.getState().haltedReason ?? "").includes("losing trades in a row"),
+    (e.getState().haltedReason ?? "").includes("in a row"),
+    e.getState().haltedReason ?? "",
+  );
+  check(
+    "the halt names which ledger it counted",
+    (e.getState().haltedReason ?? "").includes("paper"),
     e.getState().haltedReason ?? "",
   );
 
@@ -485,6 +492,169 @@ reset();
   fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(withWin), "utf-8");
   e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
   check("a win breaks the streak", e.getState().status === "running");
+}
+
+section("paper and live are separate accounts");
+reset();
+{
+  const now = Date.now();
+  const trade = (dryRun: boolean, pnlUsd: number, n: number): TradeRecord => ({
+    ticker: `KXSEP-${n}`, title: "t", side: "yes", entryCents: 50, exitCents: 45,
+    contracts: 10, pnlUsd, openedAt: now - n * 1000, closedAt: now - n * 900,
+    reason: "stop-loss", dryRun,
+  });
+
+  // A losing practice run: four paper losses well past a $25 daily limit.
+  fs.writeFileSync(
+    path.join(dataDir(), "history.json"),
+    JSON.stringify([1, 2, 3, 4].map((n) => trade(true, -10, n))),
+    "utf-8",
+  );
+
+  // Live mode: paper's losses must not arm the live brakes. Credentials are
+  // supplied because isLive needs both the flag and a usable key.
+  const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+  const liveEngine = new TradingEngine(
+    { ...DEFAULT_SETTINGS, liveMode: true, dailyLossLimitUsd: 25, maxConsecutiveLosses: 4 },
+    liveCreds,
+  );
+  check("live mode is actually on for this case", liveEngine.getState().dryRun === false);
+  check(
+    "paper losses do not block a live start",
+    liveEngine.blockedByBrakes() === null,
+    liveEngine.blockedByBrakes() ?? "",
+  );
+  check("live scoreboard ignores paper trades", liveEngine.getState().allTimePnlUsd === 0);
+  check("live win/loss counts ignore paper trades", liveEngine.getState().losses === 0);
+  check("live today ignores paper trades", liveEngine.getState().todayPnlUsd === 0);
+
+  // The same history in paper mode must still stop the engine — the brake is
+  // not being weakened, only pointed at the right ledger.
+  const paperEngine = new TradingEngine({
+    ...DEFAULT_SETTINGS,
+    dailyLossLimitUsd: 25,
+    maxConsecutiveLosses: 4,
+  });
+  check("paper losses still block a paper start", paperEngine.blockedByBrakes() !== null);
+  check("paper scoreboard sees its own trades", paperEngine.getState().allTimePnlUsd === -40);
+
+  // And live losses must not leak the other way.
+  fs.writeFileSync(
+    path.join(dataDir(), "history.json"),
+    JSON.stringify([1, 2, 3, 4].map((n) => trade(false, -10, n))),
+    "utf-8",
+  );
+  const paper2 = new TradingEngine({
+    ...DEFAULT_SETTINGS,
+    dailyLossLimitUsd: 25,
+    maxConsecutiveLosses: 4,
+  });
+  check("live losses do not block a paper start", paper2.blockedByBrakes() === null);
+}
+
+section("halts can be escaped");
+reset();
+{
+  const now = Date.now();
+  const losses: TradeRecord[] = [1, 2, 3, 4].map((n) => ({
+    ticker: `KXHALT-${n}`, title: "t", side: "yes", entryCents: 50, exitCents: 45,
+    contracts: 10, pnlUsd: -10, openedAt: now - n * 1000, closedAt: now - n * 900,
+    reason: "stop-loss", dryRun: true,
+  }));
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(losses), "utf-8");
+
+  // Before 1.7.1 start() cleared the banner and the first scan re-halted, so
+  // the button looked dead. It must refuse up front instead.
+  const e = new TradingEngine({ ...DEFAULT_SETTINGS, dailyLossLimitUsd: 25 });
+  check("a blocked engine refuses to start", (e.start(), e.getState().status === "stopped"));
+  check(
+    "the refusal names the way out",
+    (e.getState().haltedReason ?? "").includes("Resume"),
+    e.getState().haltedReason ?? "",
+  );
+
+  // Resume: the limit is untouched, but its allowance restarts from now.
+  e.clearHalt();
+  check("resuming clears the banner", e.getState().haltedReason === null);
+  check("resuming unblocks the brakes", e.blockedByBrakes() === null);
+  check(
+    "resuming does not weaken the limit",
+    e.getState().status === "stopped" && loadSettings().dailyLossLimitUsd === DEFAULT_SETTINGS.dailyLossLimitUsd,
+  );
+  e.start();
+  check("the engine starts after resuming", e.getState().status === "running");
+  e.stop();
+
+  // The acknowledgment must survive a restart, or closing the app resurrects
+  // a halt the user already dealt with.
+  const reopened = new TradingEngine({ ...DEFAULT_SETTINGS, dailyLossLimitUsd: 25 });
+  check("the acknowledgment persists across a restart", reopened.blockedByBrakes() === null);
+
+  // A fresh loss after acknowledging must halt again — the brake still works.
+  const fresh = loadHistory();
+  fresh.push({
+    ticker: "KXHALT-NEW", title: "t", side: "yes", entryCents: 50, exitCents: 45,
+    contracts: 10, pnlUsd: -30, openedAt: Date.now(), closedAt: Date.now() + 5,
+    reason: "stop-loss", dryRun: true,
+  });
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(fresh), "utf-8");
+  const after = new TradingEngine({ ...DEFAULT_SETTINGS, dailyLossLimitUsd: 25 });
+  check("a new loss past the limit halts again", after.blockedByBrakes() !== null);
+
+  // Raising the limit is the other way out, and the banner must follow.
+  after.start();
+  check("still blocked before the limit is raised", after.getState().haltedReason !== null);
+  after.updateSettings({ ...DEFAULT_SETTINGS, dailyLossLimitUsd: 500 });
+  check("raising the limit clears the stale banner", after.getState().haltedReason === null);
+  after.start();
+  check("and the engine starts", after.getState().status === "running");
+  after.stop();
+}
+
+section("scoped clearing and reset");
+reset();
+{
+  const now = Date.now();
+  const mk = (dryRun: boolean, n: number): TradeRecord => ({
+    ticker: `KXMIX-${n}`, title: "t", side: "yes", entryCents: 50, exitCents: 52,
+    contracts: 10, pnlUsd: 0.2, openedAt: now, closedAt: now + n,
+    reason: "take-profit", dryRun,
+  });
+  fs.writeFileSync(
+    path.join(dataDir(), "history.json"),
+    JSON.stringify([mk(true, 1), mk(false, 2), mk(true, 3)]),
+    "utf-8",
+  );
+
+  clearHistory("paper");
+  check("clearing paper keeps the live trades", loadHistory().length === 1);
+  check("the survivor is the live one", loadHistory()[0].dryRun === false);
+
+  fs.writeFileSync(
+    path.join(dataDir(), "history.json"),
+    JSON.stringify([mk(true, 1), mk(false, 2)]),
+    "utf-8",
+  );
+  clearHistory("live");
+  check("clearing live keeps the paper trades", loadHistory().length === 1 && loadHistory()[0].dryRun);
+
+  clearHistory("all");
+  check("clearing all empties it", loadHistory().length === 0);
+
+  // The reset the user actually needs: results gone, credentials intact.
+  saveCredentials({ apiKeyId: "KEEP-ME", apiPrivateKeyPem: PEM });
+  saveSettings({ ...DEFAULT_SETTINGS, tradeSizeUsd: 77 });
+  saveProfile("keep", loadSettings());
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify([mk(true, 1)]), "utf-8");
+  recordScan([mkt("KXKEEP", 40, 41)]);
+
+  resetTradingData();
+  check("reset trading data clears history", loadHistory().length === 0);
+  check("reset trading data clears equity", loadEquity().length === 0);
+  check("reset trading data keeps the API key", loadCredentials().apiKeyId === "KEEP-ME");
+  check("reset trading data keeps settings", loadSettings().tradeSizeUsd === 77);
+  check("reset trading data keeps saved setups", loadProfiles().length === 1);
+  check("reset trading data keeps the recording", recordingInfo().scans === 1);
 }
 
 section("trading hours");

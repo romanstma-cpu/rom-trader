@@ -282,6 +282,8 @@ export interface RomApi {
     getState: () => Promise<EngineState>;
     getLogs: () => Promise<LogLine[]>;
     getSignals: () => Promise<Signal[]>;
+    /** Acknowledges a self-imposed halt; limits stay, their allowance restarts. */
+    clearHalt: () => Promise<void>;
     onState: (cb: (s: EngineState) => void) => () => void;
     onLog: (cb: (l: LogLine) => void) => () => void;
   };
@@ -291,7 +293,7 @@ export interface RomApi {
   };
   history: {
     get: () => Promise<TradeRecord[]>;
-    clear: () => Promise<TradeRecord[]>;
+    clear: (mode?: "all" | "paper" | "live") => Promise<TradeRecord[]>;
     export: () => Promise<ExportResult>;
   };
   equity: { get: () => Promise<EquityPoint[]> };
@@ -327,6 +329,8 @@ export interface RomApi {
     dataDir: () => Promise<string>;
     openDataFolder: () => Promise<string>;
     openMarket: (ticker: string) => Promise<void>;
+    /** Clears results and halts; keeps keys, settings, setups and recordings. */
+    resetTradingData: () => Promise<TradeRecord[]>;
     factoryReset: () => Promise<Settings>;
   };
   state: {

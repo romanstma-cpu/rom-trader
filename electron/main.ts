@@ -31,6 +31,7 @@ import {
   loadHistory,
   loadProfiles,
   loadSettings,
+  resetTradingData,
   saveAppState,
   saveProfile,
   saveSettings,
@@ -246,6 +247,7 @@ function registerIpc(): void {
   ipcMain.handle("engine:getState", () => engine.getState());
   ipcMain.handle("engine:getLogs", () => engine.getLogs());
   ipcMain.handle("engine:getSignals", () => engine.getSignals());
+  ipcMain.handle("engine:clearHalt", () => engine.clearHalt());
 
   ipcMain.handle("settings:get", () => loadSettings());
   ipcMain.handle("settings:set", (_e, s: Settings) => {
@@ -255,10 +257,12 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("history:get", () => loadHistory());
-  ipcMain.handle("history:clear", () => {
-    clearHistory();
-    clearEquity();
-    return [];
+  ipcMain.handle("history:clear", (_e, mode: "all" | "paper" | "live" = "all") => {
+    const kept = clearHistory(mode);
+    // The equity curve is one line across both modes, so it can only be
+    // truthfully kept when nothing was deleted from under it.
+    if (mode === "all") clearEquity();
+    return kept;
   });
   ipcMain.handle("history:export", async () => {
     const rows = loadHistory();
@@ -379,6 +383,16 @@ function registerIpc(): void {
     if (!/^[A-Z0-9._-]{1,64}$/i.test(ticker)) throw new Error("Refusing to open an odd ticker.");
     return shell.openExternal(`https://kalshi.com/markets/${encodeURIComponent(ticker)}`);
   });
+  ipcMain.handle("app:resetTradingData", () => {
+    // Stopping first so nothing is mid-position when the ledger disappears.
+    engine.stop();
+    resetTradingData();
+    // The engine caches nothing from these files, but its in-memory halt has
+    // to go too or the banner outlives the data that justified it.
+    engine.clearHalt();
+    return loadHistory();
+  });
+
   ipcMain.handle("app:factoryReset", () => {
     engine.stop();
     factoryReset();
