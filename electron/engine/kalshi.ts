@@ -89,11 +89,25 @@ export class KalshiClient {
    */
   async getActiveMarkets(limit = 40): Promise<KalshiMarket[]> {
     const now = Math.floor(Date.now() / 1000);
-    const data = await this.request<{ markets: RawMarket[] }>(
-      "GET",
-      `/markets?limit=1000&status=open&min_close_ts=${now}&max_close_ts=${now + 7200}`,
-    );
-    return (data.markets ?? [])
+    // The API caps a page at 1000 rows in whatever order it prefers, so a
+    // single page made "top forty by volume" really mean "top forty of
+    // whichever thousand came back first". A few cursor-follows make the
+    // sort honest; the cap keeps a busy day from turning one scan into six
+    // requests.
+    const raw: RawMarket[] = [];
+    let cursor = "";
+    for (let page = 0; page < 3; page++) {
+      const data = await this.request<{ markets: RawMarket[]; cursor?: string }>(
+        "GET",
+        `/markets?limit=1000&status=open&min_close_ts=${now}&max_close_ts=${now + 7200}` +
+          (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""),
+      );
+      const batch = data.markets ?? [];
+      raw.push(...batch);
+      cursor = data.cursor ?? "";
+      if (cursor === "" || batch.length < 1000) break;
+    }
+    return raw
       .filter((m) => !m.is_provisional && !m.mve_collection_ticker)
       .map(
         (m): KalshiMarket => ({

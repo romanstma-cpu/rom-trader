@@ -235,6 +235,40 @@ export class TradingEngine {
   private static readonly MAX_HISTORY = 20;
   private static readonly MAX_SIGNALS = 60;
 
+  /** Live orders still in flight, so a quit can wait for them to land. */
+  private liveOps = new Set<Promise<unknown>>();
+
+  /**
+   * Registers a live-order promise so drainLiveOrders can wait on it.
+   *
+   * The caller keeps its own .catch chain; what is tracked is the whole
+   * chain, error handling included, so draining waits for the log line too.
+   */
+  private trackLiveOp(p: Promise<unknown>): void {
+    const wrapped = p.catch(() => {
+      // tracking must never surface an error the chain already handled
+    });
+    this.liveOps.add(wrapped);
+    void wrapped.finally(() => this.liveOps.delete(wrapped));
+  }
+
+  /**
+   * Waits briefly for in-flight live orders to reach Kalshi.
+   *
+   * stop() fires its closing sells without waiting, which is right for a
+   * running session and wrong at quit: tearing the process down cancels
+   * whatever had not left the machine yet, and a closing sell that never
+   * arrives leaves a real position open with nobody watching it. Bounded, so
+   * a dead network cannot hold the quit hostage.
+   */
+  async drainLiveOrders(timeoutMs = 4000): Promise<void> {
+    if (this.liveOps.size === 0) return;
+    await Promise.race([
+      Promise.allSettled([...this.liveOps]),
+      new Promise((r) => setTimeout(r, timeoutMs)),
+    ]);
+  }
+
   // Credentials are passed in rather than read from settings: they live in an
   // encrypted vault the engine has no business touching, and injecting them
   // keeps this class runnable headless in tests.
@@ -701,13 +735,17 @@ export class TradingEngine {
           }
           const p = this.positions.find((x) => x.ticker === ticker);
           if (p) this.settlePosition(p, result);
-        } else if (market.yes_bid > 0 || market.yes_ask > 0) {
-          // Still quoted — hand it to the normal management path so stops,
+        } else if (market.yes_bid > 0 && market.yes_ask > 0) {
+          // Still two-sided — hand it to the normal management path so stops,
           // targets and fills work exactly as if it were still in the sweep.
+          // Both sides, deliberately: the sweep filters one-sided books out,
+          // so the exits have never had to face a bid of zero — and a missing
+          // bid read as bid 0 would "stop-loss" the position at a total loss
+          // on a trade that never happened.
           out.push(market);
         }
-        // "closed" (trading over, settlement pending) has no book and no
-        // exit; nothing to do until the settlement lands.
+        // "closed" (trading over, settlement pending) and one-sided books
+        // offer no exit; nothing to do until quotes or settlement return.
       } catch (e) {
         // One missing quote must not fail the whole tick; ask again next scan.
         this.log("warn", `Could not refresh ${ticker}: ${(e as Error).message}`);
@@ -961,15 +999,17 @@ export class TradingEngine {
     }
 
     if (this.isLive) {
-      void this.client
-        .placeOrder({
-          ticker: m.ticker,
-          side: "yes",
-          action: "buy",
-          count: contracts,
-          buyMaxCostCents: m.yes_ask * contracts,
-        })
-        .catch((e) => this.log("error", `Live order failed for ${m.ticker}: ${e.message}`));
+      this.trackLiveOp(
+        this.client
+          .placeOrder({
+            ticker: m.ticker,
+            side: "yes",
+            action: "buy",
+            count: contracts,
+            buyMaxCostCents: m.yes_ask * contracts,
+          })
+          .catch((e) => this.log("error", `Live order failed for ${m.ticker}: ${e.message}`)),
+      );
     }
 
     // Taker fee on the way in. Charged to cash immediately, the way Kalshi
@@ -1044,15 +1084,17 @@ export class TradingEngine {
     this.pendingOrders.push(order);
 
     if (this.isLive) {
-      void this.client
-        .placeLimitBuy(m.ticker, contracts, limitCents)
-        .then((id) => this.attachOrderId(order, id))
-        .catch((e) => {
-          // Kalshi refused (post_only would have crossed, insufficient funds,
-          // closed market). The paper-side reservation must be unwound or the
-          // engine trades as if the money were still committed.
-          this.cancelPending(order, `Kalshi rejected the order: ${(e as Error).message}`);
-        });
+      this.trackLiveOp(
+        this.client
+          .placeLimitBuy(m.ticker, contracts, limitCents)
+          .then((id) => this.attachOrderId(order, id))
+          .catch((e) => {
+            // Kalshi refused (post_only would have crossed, insufficient
+            // funds, closed market). The paper-side reservation must be
+            // unwound or the engine trades as if the money were committed.
+            this.cancelPending(order, `Kalshi rejected the order: ${(e as Error).message}`);
+          }),
+      );
     }
 
     this.log(
@@ -1077,13 +1119,15 @@ export class TradingEngine {
       order.orderId = id;
       return;
     }
-    void this.client.cancelOrder(id).catch((e) => {
-      this.log(
-        "warn",
-        `A resting order on ${order.ticker} was confirmed after being cancelled locally, and ` +
-          `could not be cancelled at Kalshi: ${(e as Error).message}. Check your Kalshi orders page.`,
-      );
-    });
+    this.trackLiveOp(
+      this.client.cancelOrder(id).catch((e) => {
+        this.log(
+          "warn",
+          `A resting order on ${order.ticker} was confirmed after being cancelled locally, and ` +
+            `could not be cancelled at Kalshi: ${(e as Error).message}. Check your Kalshi orders page.`,
+        );
+      }),
+    );
   }
 
   /**
@@ -1190,15 +1234,17 @@ export class TradingEngine {
     // resting orders from the books here while leaving them resting — and
     // able to fill — at the exchange, with nothing watching them.
     if (this.isLive && o.orderId) {
-      void this.client.cancelOrder(o.orderId).catch((e) => {
-        // Most likely the order filled in the race between our decision and
-        // the cancel. Tell the user to look rather than guessing.
-        this.log(
-          "warn",
-          `Could not cancel resting order on ${o.ticker}: ${(e as Error).message}. ` +
-            `Check your Kalshi orders page.`,
-        );
-      });
+      this.trackLiveOp(
+        this.client.cancelOrder(o.orderId).catch((e) => {
+          // Most likely the order filled in the race between our decision and
+          // the cancel. Tell the user to look rather than guessing.
+          this.log(
+            "warn",
+            `Could not cancel resting order on ${o.ticker}: ${(e as Error).message}. ` +
+              `Check your Kalshi orders page.`,
+          );
+        }),
+      );
     }
     this.log("info", `EXPIRE ${o.ticker} — ${o.contracts}x limit ${o.limitCents}c: ${why}`);
   }
@@ -1255,9 +1301,11 @@ export class TradingEngine {
 
   private closePosition(p: Position, reason: string): void {
     if (this.isLive) {
-      void this.client
-        .placeOrder({ ticker: p.ticker, side: "yes", action: "sell", count: p.contracts })
-        .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`));
+      this.trackLiveOp(
+        this.client
+          .placeOrder({ ticker: p.ticker, side: "yes", action: "sell", count: p.contracts })
+          .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`)),
+      );
     }
 
     const exitFeeUsd = takerFeeUsd(p.contracts, p.currentBidCents);

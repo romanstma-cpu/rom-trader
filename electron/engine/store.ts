@@ -222,9 +222,22 @@ function readArray<T>(file: string): T[] {
 }
 
 function writeJson(file: string, value: unknown): void {
+  const target = path.join(dataDir(), file);
+  const tmp = `${target}.tmp`;
   try {
-    fs.writeFileSync(path.join(dataDir(), file), JSON.stringify(value, null, 2));
+    // Write-then-rename, so a crash mid-write can never leave a half-written
+    // file behind. That mattered more than it looked: the readers here are
+    // deliberately tolerant, so a torn history.json would not error — it
+    // would quietly read back as an empty array, and every recorded trade
+    // would be gone without a word said.
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+    fs.renameSync(tmp, target);
   } catch (e) {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {
+      // the stray .tmp is cosmetic; the error below is what matters
+    }
     // Raw ENOENT/EPERM text tells the user nothing; name the folder involved.
     throw new Error(
       `Could not save ${file} to ${app.getPath("userData")}: ${(e as Error).message}`,

@@ -1507,6 +1507,16 @@ reset();
   check("— and not cancelled", !cancelled.includes("on-time"));
 }
 
+section("writes are atomic");
+reset();
+{
+  saveSettings({ ...DEFAULT_SETTINGS, tradeSizeUsd: 21 });
+  saveProfile("tmp-check", loadSettings());
+  check("saves leave no .tmp files behind",
+    fs.readdirSync(dataDir()).filter((f) => f.endsWith(".tmp")).length === 0);
+  check("and the write still lands", loadSettings().tradeSizeUsd === 21);
+}
+
 section("sanitise fallbacks track the shipped defaults");
 reset();
 {
@@ -1616,6 +1626,81 @@ void (async () => {
     const survived = await anyE.refreshMissingMarkets([]);
     check("a failed refresh leaves the position for next scan",
       anyE.positions.length === 1 && survived.length === 0);
+
+    // A one-sided book must not reach the exits: the sweep filters those
+    // out, so a missing bid handed through here would read as bid 0 and
+    // "stop-loss" the position at a total loss that never happened.
+    anyE = engineWithClient({
+      getMarket: async (t: string) => ({ market: mkt(t, 0, 45), status: "open", result: "" }),
+      hasAuth: false,
+    });
+    anyE.positions = [posFor("KXTHIN")];
+    const oneSided = await anyE.refreshMissingMarkets([]);
+    check("a book with no bids is held, not stopped out",
+      oneSided.length === 0 && anyE.positions.length === 1);
+  }
+
+  section("live orders drain before quit");
+  reset();
+  {
+    const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+    type DrainInternals = {
+      status: string;
+      cashUsd: number;
+      positions: unknown[];
+      pendingOrders: unknown[];
+      client: unknown;
+      closePosition: (p: unknown, reason: string) => void;
+      cancelPending: (o: unknown, why: string) => void;
+    };
+
+    // A closing sell that resolves after stop() must still land before drain
+    // returns — that is the whole point of draining.
+    let sellLanded = false;
+    const e = new TradingEngine({ ...DEFAULT_SETTINGS, liveMode: true }, liveCreds);
+    const anyE = e as unknown as DrainInternals;
+    anyE.status = "running";
+    anyE.client = {
+      hasAuth: true,
+      placeOrder: () =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            sellLanded = true;
+            resolve({});
+          }, 40),
+        ),
+      cancelOrder: () => new Promise(() => {}), // never resolves
+    };
+    anyE.cashUsd = 100;
+    const pos = {
+      ticker: "KXQUIT", title: "t", side: "yes", entryCents: 40, contracts: 10,
+      currentBidCents: 41, peakMidCents: 41, unrealizedUsd: 0, entryFeeUsd: 0.1,
+      openedAt: Date.now(),
+    };
+    anyE.positions = [pos];
+    anyE.closePosition(pos, "engine stopped");
+    check("the sell is in flight, not yet landed", sellLanded === false);
+    await e.drainLiveOrders(2000);
+    check("draining waits for the closing sell", sellLanded === true);
+
+    // A dead network must not hold the quit hostage: the never-resolving
+    // cancel above is bounded by the timeout.
+    const order = {
+      ticker: "KXHANG", title: "t", side: "yes", limitCents: 40, contracts: 5,
+      costUsd: 2, placedAt: Date.now(), ticksLeft: 3, orderId: "hung-order",
+    };
+    anyE.pendingOrders = [order];
+    anyE.cancelPending(order, "quit test");
+    const t0 = Date.now();
+    await e.drainLiveOrders(80);
+    const waited = Date.now() - t0;
+    check("a hung order cannot hold the quit hostage", waited < 1500, `${waited}ms`);
+
+    // Nothing in flight resolves immediately — dry-run quits pay no toll.
+    const idle = new TradingEngine({ ...DEFAULT_SETTINGS });
+    const t1 = Date.now();
+    await idle.drainLiveOrders(4000);
+    check("an idle engine drains instantly", Date.now() - t1 < 100);
   }
 
   // ---------------------------------------------------------------- result

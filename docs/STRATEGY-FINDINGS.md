@@ -443,3 +443,33 @@ safety refusal. The UI now believes the engine's answer, and a refusal
 also raises an engine event, so starting from the tray — where there is
 no banner — produces a Windows toast naming the reason instead of a
 button that silently does nothing.
+
+---
+
+# 1.7.4: quits that wait, writes that land, and a regression of my own
+
+**In-flight live orders died at quit.** `stop()` fires its closing sells
+and cancels without waiting — right for a running session, wrong at quit,
+where the process teardown killed whatever had not left the machine. A
+closing sell that never arrives leaves a real position open with nobody
+watching it. The engine now tracks live-order promises and the quit path
+drains them behind a bounded timeout, so a dead network cannot hold the
+quit hostage and a dry-run quit pays no toll at all.
+
+**A crash mid-write could silently erase every trade.** Settings and
+history were written in place, and the readers are deliberately tolerant
+— so a torn `history.json` would not error; it would read back as an
+empty array. All writes are now write-then-rename, which is atomic on the
+same volume: the old file survives until the new one is whole.
+
+**The 1.7.2 refresh reintroduced a hazard the sweep had always filtered.**
+`getActiveMarkets` only returns two-sided books, so the exits had never
+faced a bid of zero — but the held-market refresh let one-sided books
+through, and a missing bid read as bid 0 would "stop-loss" a position at
+a total loss on a trade that never happened. The refresh now requires
+both sides, holding the position until quotes return.
+
+**"Top forty by volume" was top forty of one API page.** The markets
+query never followed the cursor, so the volume sort ran over whichever
+thousand rows the server sent first. The fetch now follows the cursor a
+few pages, verified against the live API.

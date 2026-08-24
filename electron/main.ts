@@ -485,8 +485,22 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 // Signing out or shutting down Windows must not be intercepted by close-to-tray.
-app.on("before-quit", () => {
+let draining = false;
+app.on("before-quit", (e) => {
   quitting = true;
+  if (draining) return;
+  const s = engine?.getState();
+  const busy =
+    s !== undefined &&
+    (s.status === "running" || s.positions.length > 0 || s.pendingOrders.length > 0);
+  if (!busy) return;
+  // Stopping fires the closing sells and order cancels; give them a bounded
+  // moment to actually leave the machine before the process dies under them.
+  // In dry-run there is nothing in flight and this resolves immediately.
+  e.preventDefault();
+  draining = true;
+  engine.stop();
+  void engine.drainLiveOrders().then(() => app.quit());
 });
 
 app.on("window-all-closed", () => {
