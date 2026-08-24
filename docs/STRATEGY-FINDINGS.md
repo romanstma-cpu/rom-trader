@@ -629,6 +629,40 @@ Also observed and deliberately not acted on: entries between 45c and
 maximum uncertainty — but seventeen trades is a coin reading, and the
 price-band settings already let anyone act on it by hand.
 
+---
+
+# 1.9.3: a clock bug was flattering the replays — corrections
+
+The sweep reported zero trades for every candidate across a thousand
+held-out scans, and total replay trade counts were *shrinking* as the
+recording grew. Impossible market behaviour, so it was machinery: the
+1.8.0 close-time gate measured "minutes to close" against the wall
+clock instead of the scan's own clock. In a replay, every recorded
+close time is in the past — so every market recorded by a 1.8.0+ build
+replayed as "closing soon" and was silently refused. Fixed to use the
+scan timestamp, with a regression test that replays a week-old
+recording and requires it to trade.
+
+**Corrections to this document.** Every replay figure computed between
+1.8.0 and this fix ran on partially-zeroed data: the "Patient PF
+1.04/1.43/1.45" readings, the "+$10.76 / ~$20 filter attribution", and
+the lockout's "−$3.86" figure all overstated things by excluding the
+newest — often hardest — scans from every configuration equally. They
+are retracted as measurements. The **live** sessions were never
+affected (they are actual paper trades, not replays): the +$16.05
+afternoon and each losing stint stand as reported.
+
+**The honest full-recording verdict** (2,597 scans, 796 minutes, 7
+segments, 1,896 markets, Sunday night through Monday): every
+configuration is negative. Defaults −$100.66 over 140 trades; Patient
+−$57.50 over 86 (PF 0.50), now roughly level with Patient-no-filter
+(−$54.63); maker entries remain the least-bad entry mechanic. The
+sweep's best out-of-sample candidate loses $30 on 28 unseen trades,
+and its own output says what that means. On thirteen hours of real
+recorded market, nothing here has an edge — which is what this
+document has said from the start, now measured with a clock that
+tells the truth.
+
 The mechanism 1.9.1 adds came from both live loss clusters telling the
 same story: **the engine was trading markets it had only just met.**
 The regime filter abstained below nine samples — waving through exactly

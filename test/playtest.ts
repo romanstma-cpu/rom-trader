@@ -1275,6 +1275,30 @@ reset();
   // 0 disables the gate entirely.
   e = runEngine({ minMinutesToClose: 0 }, [soonFlat, soonFlat, soonFlat, soonFlat, soonJump]);
   check("0 disables the cutoff", e.getState().positions.length === 1);
+
+  // The gate must run on the scan's clock, not the wall clock. A recording
+  // is entirely in the past, so measuring against Date.now() marked every
+  // recorded market "closing soon" and silently zeroed every backtest of
+  // data that carried close times. The tell was trade counts shrinking as
+  // the recording grew.
+  const t0 = Date.now() - 7 * 24 * 3600_000; // a week-old recording
+  const oldScan = (i: number, bid: number, ask: number, closeInS: number) => ({
+    ts: t0 + i * 15000,
+    markets: [{ ...mkt("KXPAST", bid, ask), volume: 100 + i * 20, close_ts: Math.floor(t0 / 1000) + closeInS }],
+  });
+  const oldScans = [
+    oldScan(0, 40, 41, 5400), oldScan(1, 40, 41, 5400), oldScan(2, 40, 41, 5400),
+    oldScan(3, 40, 41, 5400), oldScan(4, 45, 46, 5400),
+  ];
+  const past = runBacktest(oldScans as never, { ...DEFAULT_SETTINGS }, "past");
+  check("an old recording with time to close still trades", past.trades > 0, `${past.trades} trades`);
+
+  const oldSoon = [
+    oldScan(0, 40, 41, 600), oldScan(1, 40, 41, 600), oldScan(2, 40, 41, 600),
+    oldScan(3, 40, 41, 600), oldScan(4, 45, 46, 600),
+  ];
+  const pastSoon = runBacktest(oldSoon as never, { ...DEFAULT_SETTINGS }, "past-soon");
+  check("— while its genuinely near-close markets are still refused", pastSoon.trades === 0);
 }
 
 section("drawdown brake");

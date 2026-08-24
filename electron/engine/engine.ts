@@ -944,11 +944,17 @@ export class TradingEngine {
         // where strikes converge to 0c or 100c and a momentum entry is a bet
         // on the resolution, not on a move. A market with no known close is
         // let through rather than guessed at — old recordings have none.
+        //
+        // Measured against `began` — the scan's own clock — never the wall
+        // clock: in a replay every recorded close time is in the past, so
+        // Date.now() here silently marked the entire recording "closing
+        // soon" and zeroed every backtest of post-1.9.1 data. The tell was
+        // trade counts shrinking as the recording grew.
         this.settings.minMinutesToClose > 0 &&
         m.close_ts > 0 &&
-        m.close_ts * 1000 - Date.now() < this.settings.minMinutesToClose * 60_000
+        m.close_ts * 1000 - began < this.settings.minMinutesToClose * 60_000
       ) {
-        const minsLeft = Math.max(0, Math.round((m.close_ts * 1000 - Date.now()) / 60_000));
+        const minsLeft = Math.max(0, Math.round((m.close_ts * 1000 - began) / 60_000));
         reason = `closes in ${minsLeft}m — under your ${this.settings.minMinutesToClose}m entry cutoff`;
         stats.skippedClosing++;
       } else if (spread > this.settings.maxSpreadCents) {
