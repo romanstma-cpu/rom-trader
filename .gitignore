@@ -11,6 +11,8 @@ test/playtest.js
 test/dpapi-check.js
 test/tray-check.js
 scripts/simulate.js
+scripts/record.js
+scripts/replay.js
 
 # local editor / OS noise
 .vscode/

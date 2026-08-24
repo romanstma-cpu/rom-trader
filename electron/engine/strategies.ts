@@ -31,6 +31,8 @@ export interface Strategy {
     | "minNetEdgeCents"
     | "regimeFilterEnabled"
     | "maxDrawdownPct"
+    | "momentumOnBid"
+    | "requireTradeActivity"
   >;
 }
 
@@ -71,6 +73,8 @@ export const STRATEGIES: Strategy[] = [
       minNetEdgeCents: 3,
       regimeFilterEnabled: false,
       maxDrawdownPct: 15,
+      momentumOnBid: true,
+      requireTradeActivity: true,
     },
   },
   {
@@ -101,6 +105,8 @@ export const STRATEGIES: Strategy[] = [
       minNetEdgeCents: 2,
       regimeFilterEnabled: false,
       maxDrawdownPct: 20,
+      momentumOnBid: true,
+      requireTradeActivity: true,
     },
   },
   {
@@ -132,6 +138,8 @@ export const STRATEGIES: Strategy[] = [
       minNetEdgeCents: 2,
       regimeFilterEnabled: false,
       maxDrawdownPct: 25,
+      momentumOnBid: true,
+      requireTradeActivity: true,
     },
   },
   {
@@ -168,6 +176,8 @@ export const STRATEGIES: Strategy[] = [
       minNetEdgeCents: 3,
       regimeFilterEnabled: true,
       maxDrawdownPct: 15,
+      momentumOnBid: true,
+      requireTradeActivity: true,
     },
   },
 ];

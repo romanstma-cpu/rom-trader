@@ -203,3 +203,73 @@ changed in 1.5.0 is that the bot loses slower, refuses more bad trades,
 measures itself honestly, and can now be tested as a maker against real
 recorded Kalshi data — which is the experiment that actually matters, and the
 one these synthetic worlds cannot run.
+
+---
+
+# 1.6.0: the first real recordings, and what the mid was hiding
+
+No recording existed — the engine had never been left running since recording
+shipped. So 1.6.0 adds `scripts/record.ts`, a headless recorder that polls the
+same public endpoint at the same cadence and writes the app's own
+`scans.jsonl`, and `scripts/replay.ts`, which replays it through the real
+engine and reports the order counts maker mode lives or dies by. Recordings
+with stop/restart seams are split into contiguous segments first: a seam
+replayed naively moves prices an hour in one step and manufactures momentum
+no live engine ever saw.
+
+## What real books look like
+
+Roughly 43 minutes of a Sunday night, 220 distinct markets: **median spread
+7c**, with only **11% of books inside the default 2c spread limit**. The
+synthetic worlds ran a constant 2c spread. Real overnight Kalshi is far
+coarser, and that coarseness is what exposed the defect below.
+
+## The defect: mid-price momentum is half quote noise
+
+The momentum signal was measured on the mid. The mid rises by half of any
+one-sided quote change — so **a seller pulling an ask reads as buying
+pressure when nothing traded at all.** On books this wide, that is not an
+edge case; it is most of what a mid does overnight. The pathological entry is
+buying a lifted ask because a seller left: instant loss of the whole spread,
+booked as acting on "momentum."
+
+Two gates fix it, both designed from the mechanism before measuring:
+
+- **Bid momentum** (`momentumOnBid`): measure the move on the bid. A rising
+  bid is a buyer actually paying more; it cannot be lifted by the ask side.
+- **Traded-volume gate** (`requireTradeActivity`): refuse entries when no
+  contracts printed during the momentum window. Quotes repositioning without
+  prints is a market maker, not a move.
+
+Measured on the recording (14–16 trades per row — direction, not proof):
+
+| config | trades | win | PF | per trade |
+|---|---|---|---|---|
+| old ungated defaults | 15 | 27% | 0.25 | −$1.86 |
+| bid momentum only | 16 | 25% | 0.41 | −$1.77 |
+| volume gate only | 14 | 22% | 0.18 | −$2.68 |
+| **both gates** | 14 | 29% | **0.54** | **−$1.03** |
+
+**Both gates ship on by default.** Three reasons, in order: the mechanism is
+sound independent of this sample; a gate can only refuse an entry, never
+create a bad one, so its failure mode is trading less — the one direction
+every measurement in this document has ever rewarded; and the real-data
+result points the same way. The pair nearly halved the per-trade loss.
+
+## Maker mode's first contact with reality
+
+The synthetic worlds said maker entries cut losses; the fill worry was
+whether fills arrive at all. Real data answered both, and not the way 1.5.0
+hoped: **fills arrive readily (roughly half to two-thirds of resting orders
+filled), and they were adversely selected enough to lose more per trade than
+the taker rows** (−$2.97 vs −$1.03 on identical rules). The conservative fill
+model was not pessimistic about fills — it was optimistic about what a fill
+means. The Patient preset keeps its honest description and its experimental
+status; the maker plumbing is exactly what makes collecting more evidence
+cheap.
+
+## Caveat, standing
+
+One recording, one quiet Sunday night, a dozen trades per row. These numbers
+choose directions, not truths. Every conclusion here is re-checkable in one
+command against every future recording: `node scripts/replay.js`.

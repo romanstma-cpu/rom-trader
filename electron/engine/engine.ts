@@ -29,6 +29,14 @@ export interface Position {
   openedAt: number;
 }
 
+/** One tracked observation of a market: what the scanner remembers per scan. */
+export interface MarketSample {
+  mid: number;
+  bid: number;
+  /** Cumulative contracts traded, straight from the API. */
+  volume: number;
+}
+
 /**
  * A resting maker order that has not filled yet.
  *
@@ -79,6 +87,8 @@ export interface ScannerStats {
   skippedFees: number;
   /** Blocked because recent moves have been mean-reverting, not trending. */
   skippedRegime: number;
+  /** Blocked because the quotes moved but no contracts traded. */
+  skippedQuiet: number;
   scanMs: number;
 }
 
@@ -193,7 +203,16 @@ export class TradingEngine {
   private pendingOrders: PendingOrder[] = [];
   /** Session-high equity, for the drawdown brake and drawdown-scaled sizing. */
   private peakEquityUsd = 0;
-  private priceHistory = new Map<string, number[]>(); // ticker -> recent mids (cents)
+
+  /**
+   * Recent observations per ticker.
+   *
+   * The bid and cumulative volume ride along with the mid because the mid
+   * alone lies: it moves half of any one-sided quote change, so a seller
+   * pulling an ask reads as buying pressure when nothing traded at all. Real
+   * recordings showed books with 7c median spreads doing exactly this.
+   */
+  private priceHistory = new Map<string, MarketSample[]>();
   private cooldownUntil = new Map<string, number>(); // ticker -> ms timestamp
   private signals: Signal[] = [];
   private scanner: ScannerStats | null = null;
@@ -460,7 +479,8 @@ export class TradingEngine {
         s.skippedCooldown -
         s.skippedClock -
         s.skippedFees -
-        s.skippedRegime,
+        s.skippedRegime -
+        s.skippedQuiet,
     );
     const causes = [
       {
@@ -469,6 +489,12 @@ export class TradingEngine {
           `${s.skippedRegime} of ${s.marketsScanned} markets are being skipped by the regime ` +
           `filter because their recent moves have reversed rather than continued. Turn it off in ` +
           `Settings to trade them anyway.`,
+      },
+      {
+        n: s.skippedQuiet,
+        msg:
+          `${s.skippedQuiet} of ${s.marketsScanned} markets moved without any contracts trading, ` +
+          `so the traded-volume gate refused them. Turn it off in Settings to act on quote moves.`,
       },
       {
         n: s.skippedSpread,
@@ -557,6 +583,7 @@ export class TradingEngine {
       skippedClock: 0,
       skippedFees: 0,
       skippedRegime: 0,
+      skippedQuiet: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
@@ -564,16 +591,26 @@ export class TradingEngine {
 
     for (const m of markets) {
       const hist = this.priceHistory.get(m.ticker) ?? [];
-      hist.push(this.mid(m));
+      hist.push({ mid: this.mid(m), bid: m.yes_bid, volume: m.volume });
       if (hist.length > TradingEngine.MAX_HISTORY) hist.shift();
       this.priceHistory.set(m.ticker, hist);
       stats.tracked++;
 
       const spread = m.yes_ask - m.yes_bid;
-      const change =
-        hist.length > TradingEngine.LOOKBACK
-          ? hist[hist.length - 1] - hist[hist.length - 1 - TradingEngine.LOOKBACK]
-          : null;
+      // The bid is a buyer actually paying more; the mid can be lifted by a
+      // seller leaving. Which one counts as momentum is a setting, measured
+      // against real recordings before the default is ever changed.
+      const src = this.settings.momentumOnBid
+        ? (s: MarketSample) => s.bid
+        : (s: MarketSample) => s.mid;
+      const warm = hist.length > TradingEngine.LOOKBACK;
+      const change = warm
+        ? src(hist[hist.length - 1]) - src(hist[hist.length - 1 - TradingEngine.LOOKBACK])
+        : null;
+      // Contracts traded over the same window the momentum is measured on.
+      const volumeDelta = warm
+        ? hist[hist.length - 1].volume - hist[hist.length - 1 - TradingEngine.LOOKBACK].volume
+        : null;
 
       let eligible = false;
       let reason: string;
@@ -598,6 +635,15 @@ export class TradingEngine {
       } else if (change < this.settings.momentumThresholdCents) {
         reason = `momentum ${fmtCents(change)} under ${this.settings.momentumThresholdCents}c trigger`;
       } else if (
+        this.settings.requireTradeActivity &&
+        volumeDelta !== null &&
+        volumeDelta <= 0
+      ) {
+        // The quotes moved but nothing printed: a market maker repositioned,
+        // nobody actually paid a higher price. That is not momentum.
+        reason = `no contracts traded in the window — the move is quotes, not trades`;
+        stats.skippedQuiet++;
+      } else if (
         // A maker enters at the bid and pays no entry fee; a taker enters at
         // the ask and pays the fee twice. The edge check has to price the
         // trade the way it will actually be done, or it refuses the wrong ones.
@@ -616,7 +662,7 @@ export class TradingEngine {
         stats.skippedFees++;
       } else if (
         this.settings.regimeFilterEnabled &&
-        (autocorr = lag1Autocorrelation(hist)) !== null &&
+        (autocorr = lag1Autocorrelation(hist.map((s) => s.mid))) !== null &&
         autocorr < 0
       ) {
         // A momentum rule assumes the last move predicts the next one. When

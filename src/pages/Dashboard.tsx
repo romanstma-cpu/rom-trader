@@ -157,6 +157,12 @@ export default function Dashboard({
                   <span className="v">{state.scanner.skippedRegime}</span>
                 </div>
               )}
+              {state.scanner.skippedQuiet > 0 && (
+                <div>
+                  <span className="k">No trades printed</span>
+                  <span className="v">{state.scanner.skippedQuiet}</span>
+                </div>
+              )}
               <div>
                 <span className="k">Scan time</span>
                 <span className="v">{state.scanner.scanMs}ms</span>

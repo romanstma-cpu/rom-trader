@@ -60,6 +60,19 @@ export interface Settings {
    * percent. Trade size also scales down as drawdown approaches it. 0 disables.
    */
   maxDrawdownPct: number;
+  /**
+   * Measure momentum on the bid instead of the mid.
+   *
+   * The mid rises half of any one-sided quote change, so a seller pulling an
+   * ask reads as buying pressure with nothing traded. The bid only rises when
+   * a buyer is actually paying more.
+   */
+  momentumOnBid: boolean;
+  /**
+   * Refuse entries when no contracts traded during the momentum window —
+   * quotes repositioning without prints is not momentum.
+   */
+  requireTradeActivity: boolean;
 }
 
 export interface AppState {
@@ -126,6 +139,12 @@ export const DEFAULT_SETTINGS: Settings = {
   minNetEdgeCents: 2,
   regimeFilterEnabled: false,
   maxDrawdownPct: 20,
+  // Both gates default on. They were designed from the mechanism before being
+  // measured, they can only refuse entries (a gate cannot create a bad trade,
+  // only skip one), and on real recorded data the pair nearly halved the
+  // per-trade loss of the old defaults. See docs/STRATEGY-FINDINGS.md.
+  momentumOnBid: true,
+  requireTradeActivity: true,
 };
 
 export const DEFAULT_APP_STATE: AppState = {
@@ -216,6 +235,8 @@ function sanitize(s: Settings): Settings {
     minNetEdgeCents: num(s.minNetEdgeCents, 0, 30, DEFAULT_SETTINGS.minNetEdgeCents),
     regimeFilterEnabled: Boolean(s.regimeFilterEnabled),
     maxDrawdownPct: num(s.maxDrawdownPct, 0, 95, DEFAULT_SETTINGS.maxDrawdownPct),
+    momentumOnBid: Boolean(s.momentumOnBid),
+    requireTradeActivity: Boolean(s.requireTradeActivity),
   };
 }
 

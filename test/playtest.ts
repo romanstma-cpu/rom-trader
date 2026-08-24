@@ -306,7 +306,16 @@ const mkt = (ticker: string, bid: number, ask: number): Mkt => ({
 
 /** Drive private tick internals with a scripted market book. */
 function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
-  const e = new TradingEngine({ ...DEFAULT_SETTINGS, ...settings });
+  const e = new TradingEngine({
+    ...DEFAULT_SETTINGS,
+    // The scripted books reuse static objects whose volume never changes, so
+    // the entry-quality gates (on by default in the app) would refuse every
+    // handwritten entry here. The harness switches them off; the gates have
+    // their own dedicated section, and any test that wants one passes it.
+    momentumOnBid: false,
+    requireTradeActivity: false,
+    ...settings,
+  });
   const anyE = e as unknown as {
     status: string;
     processPendingOrders: (m: Mkt[]) => void;
@@ -525,7 +534,14 @@ section("engine events");
 reset();
 {
   const events: { kind: string; tone: string }[] = [];
-  const e = new TradingEngine({ ...DEFAULT_SETTINGS, momentumThresholdCents: 3 });
+  // Direct construction, so the gate-off harness base does not apply — the
+  // static books here have constant volume, which the shipped gate refuses.
+  const e = new TradingEngine({
+    ...DEFAULT_SETTINGS,
+    momentumThresholdCents: 3,
+    momentumOnBid: false,
+    requireTradeActivity: false,
+  });
   e.subscribe({ onState: () => {}, onLog: () => {}, onEvent: (ev) => events.push(ev) });
 
   const anyE = e as unknown as {
@@ -765,10 +781,15 @@ reset();
   check("flatten cancels resting orders", e.getState().pendingOrders.length === 0);
 
   // A maker in a runaway market never fills: the ask never comes back down.
+  // Volume grows scan over scan so the replay runs the true shipped defaults,
+  // traded-volume gate included.
   clearHistory();
   const ladder: { ts: number; markets: Mkt[] }[] = [];
   [40, 40, 40, 40, 45, 46, 47, 48, 50, 52].forEach((p, i) => {
-    ladder.push({ ts: Date.now() + i * 15000, markets: [mkt("KXL", p, p + 1)] });
+    ladder.push({
+      ts: Date.now() + i * 15000,
+      markets: [{ ...mkt("KXL", p, p + 1), volume: 100 + i * 20 }],
+    });
   });
   const makerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS, makerEntries: true }, "maker");
   const takerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS }, "taker");
@@ -811,6 +832,56 @@ reset();
       [mkt("KXS", 45, 46)],
     ]).getState().positions.length === 1,
   );
+}
+
+section("entry-quality gates");
+reset();
+{
+  // A seller pulling the ask lifts the mid by half the move — with nothing
+  // traded. Under a permissive spread limit, mid momentum buys that lifted
+  // ask; bid momentum sees a bid that never moved and refuses.
+  const calm = [mkt("KXQ", 40, 41)];
+  const askPull = [mkt("KXQ", 40, 49)]; // bid unchanged, ask +8, mid +4
+  let e = runEngine({ maxSpreadCents: 10 }, [calm, calm, calm, calm, askPull]);
+  check("mid momentum buys a pulled ask", e.getState().positions.length === 1);
+  check(
+    "— and pays the lifted ask for it",
+    e.getState().positions[0]?.entryCents === 49,
+    `${e.getState().positions[0]?.entryCents}`,
+  );
+
+  e = runEngine({ maxSpreadCents: 10, momentumOnBid: true }, [calm, calm, calm, calm, askPull]);
+  check("bid momentum ignores a pulled ask", e.getState().positions.length === 0);
+
+  const calm2 = [mkt("KXQ2", 40, 41)];
+  const bidUp = [mkt("KXQ2", 45, 46)];
+  e = runEngine({ momentumOnBid: true }, [calm2, calm2, calm2, calm2, bidUp]);
+  check("a genuinely rising bid still triggers", e.getState().positions.length === 1);
+
+  // The traded-volume gate: quotes moving without prints is not momentum.
+  const mktV = (t: string, bid: number, ask: number, vol: number): Mkt => ({
+    ...mkt(t, bid, ask),
+    volume: vol,
+    volume_24h: vol,
+  });
+  const q = [mktV("KXV", 40, 41, 100)];
+  const jumpQuiet = [mktV("KXV", 45, 46, 100)]; // price up, nothing printed
+  const jumpTraded = [mktV("KXV", 45, 46, 160)]; // price up, 60 contracts printed
+
+  e = runEngine({ requireTradeActivity: true }, [q, q, q, q, jumpQuiet]);
+  check("no prints in the window blocks entry", e.getState().positions.length === 0);
+  check("the scanner counts the quiet skip", (e.getState().scanner?.skippedQuiet ?? 0) > 0);
+  check(
+    "the signal says quotes, not trades",
+    e.getSignals().some((s) => s.reason.includes("quotes, not trades")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  e = runEngine({ requireTradeActivity: true }, [q, q, q, q, jumpTraded]);
+  check("prints in the window allow the entry", e.getState().positions.length === 1);
+
+  e = runEngine({ requireTradeActivity: false }, [q, q, q, q, jumpQuiet]);
+  check("the gate off keeps the old behaviour", e.getState().positions.length === 1);
 }
 
 section("drawdown brake");
@@ -887,7 +958,10 @@ section("performance metrics");
   // And the backtester carries them.
   const scans: { ts: number; markets: Mkt[] }[] = [];
   [40, 40, 40, 40, 45, 46, 47, 48, 50, 52].forEach((p, i) => {
-    scans.push({ ts: Date.now() + i * 15000, markets: [mkt("KXMM", p, p + 1)] });
+    scans.push({
+      ts: Date.now() + i * 15000,
+      markets: [{ ...mkt("KXMM", p, p + 1), volume: 100 + i * 20 }],
+    });
   });
   const bt = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "metrics");
   check("backtests report metrics", bt.metrics.trades === bt.trades);
@@ -902,12 +976,16 @@ reset();
     minNetEdgeCents: -5,
     maxDrawdownPct: 200,
     makerEntries: "yes" as never,
+    momentumOnBid: 1 as never,
+    requireTradeActivity: undefined as never,
   });
   const s = loadSettings();
   check("maker TTL floors at one scan", s.makerTtlTicks === 1, `${s.makerTtlTicks}`);
   check("edge margin floors at zero", s.minNetEdgeCents === 0, `${s.minNetEdgeCents}`);
   check("drawdown limit is capped", s.maxDrawdownPct === 95, `${s.maxDrawdownPct}`);
   check("maker flag coerces to boolean", s.makerEntries === true);
+  check("bid-momentum flag coerces to boolean", s.momentumOnBid === true);
+  check("a missing gate flag reads as off", s.requireTradeActivity === false);
 }
 
 // ---------------------------------------------------------------- backtest
@@ -944,10 +1022,14 @@ reset();
 clearRecording();
 {
   // A rise big enough to trigger entry, then a further rise to take profit.
+  // Volume grows so the shipped defaults, gates included, replay as shipped.
   const scans: { ts: number; markets: Mkt[] }[] = [];
   const prices = [40, 40, 40, 40, 45, 46, 47, 48, 50, 52];
   prices.forEach((p, i) => {
-    scans.push({ ts: Date.now() + i * 15000, markets: [mkt("KXB", p, p + 1)] });
+    scans.push({
+      ts: Date.now() + i * 15000,
+      markets: [{ ...mkt("KXB", p, p + 1), volume: 100 + i * 20 }],
+    });
   });
 
   const res = runBacktest(scans as never, { ...DEFAULT_SETTINGS, momentumThresholdCents: 3 }, "test");

@@ -278,6 +278,18 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             onChange={(v) => update({ minNetEdgeCents: v })}
           />
         </div>
+        <Toggle
+          label="Measure momentum on the bid"
+          help="The mid-price rises when a seller pulls an ask — with nothing traded. The bid only rises when a buyer actually pays more. On real recordings most overnight 'momentum' was quote movement, not buying."
+          checked={settings.momentumOnBid}
+          onChange={(v) => update({ momentumOnBid: v })}
+        />
+        <Toggle
+          label="Require traded volume"
+          help="Skip entries when no contracts traded during the momentum window. A book that moved without a single print is a market maker repositioning, not a move."
+          checked={settings.requireTradeActivity}
+          onChange={(v) => update({ requireTradeActivity: v })}
+        />
         {settings.takeProfitCents <= settings.stopLossCents && (
           <div className="notice warn">
             Your take-profit is not larger than your stop, so you need to win well over half your

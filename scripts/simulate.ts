@@ -88,7 +88,10 @@ function generate(spec: MarketSpec): RecordedScan[] {
         title: `Simulated market ${i}`,
         yes_bid: Math.max(1, mid - spec.spreadCents),
         yes_ask: Math.min(99, mid + spec.spreadCents),
-        volume: 5000,
+        // Cumulative and always growing, so the traded-volume gate is neutral
+        // here: these worlds model prices, not prints, and a constant volume
+        // would make that gate silently refuse every synthetic entry.
+        volume: 5000 + s,
         status: "active",
       });
     }
