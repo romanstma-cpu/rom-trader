@@ -1066,15 +1066,37 @@ reset();
   check("persistent changes read as positive", (lag1Autocorrelation(paired) ?? -1) > 0);
   check("too little history returns null", lag1Autocorrelation([40, 41, 42]) === null);
   check("a flat series has no regime", lag1Autocorrelation([40, 40, 40, 40, 40, 40, 40, 40, 40, 40]) === null);
-  check(
-    "a short history does not block entries",
-    // Filter on, but only five samples: the engine must trade rather than
-    // wait forever for statistical significance it may never get.
-    runEngine({ regimeFilterEnabled: true }, [
+  // Reversed in 1.9.1, with evidence: this suite once required a five-sample
+  // market to trade with the filter on. Both live loss clusters were fills
+  // in markets the engine had known for about a minute — index ladders at
+  // the futures open, crypto ladders at an hourly rollover. A filter that
+  // refuses unjudgeable regimes must refuse the unjudged.
+  {
+    const young = runEngine({ regimeFilterEnabled: true }, [
       [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)], [mkt("KXS", 40, 41)],
       [mkt("KXS", 45, 46)],
-    ]).getState().positions.length === 1,
-  );
+    ]);
+    check("a market seen for five scans is refused", young.getState().positions.length === 0);
+    check(
+      "— and told it is too new, not blamed for its regime",
+      young.getSignals().some((s) => s.reason.includes("too new")),
+      young.getSignals()[0]?.reason ?? "no signals",
+    );
+    check("the young skip counts as a regime skip", (young.getState().scanner?.skippedRegime ?? 0) > 0);
+
+    // A quiet market that has been watched long enough and then wakes up is
+    // the breakout a momentum rule exists for — flat history must still pass.
+    const flatBooks = Array.from({ length: 9 }, () => [mkt("KXQ9", 40, 41)]);
+    const wake = runEngine({ regimeFilterEnabled: true }, [...flatBooks, [mkt("KXQ9", 45, 46)]]);
+    check("a well-observed flat market may still break out", wake.getState().positions.length === 1);
+
+    // With the filter off, young markets trade as they always did.
+    const off = runEngine({ regimeFilterEnabled: false }, [
+      [mkt("KXS2", 40, 41)], [mkt("KXS2", 40, 41)], [mkt("KXS2", 40, 41)], [mkt("KXS2", 40, 41)],
+      [mkt("KXS2", 45, 46)],
+    ]);
+    check("the filter off keeps the old behaviour", off.getState().positions.length === 1);
+  }
 }
 
 section("entry-quality gates");

@@ -571,3 +571,34 @@ recorded caveat that the paper fill model refuses touch-fills a real
 maker would receive.
 
 Still one Sunday. The soaks continue, and the numbers keep deciding.
+
+---
+
+# 1.9.1: the evening took the shine off, and named another mechanism
+
+While the streak brake held the engine (four straight losses — three of
+them S&P index hourlies traded within minutes of entering the sweep at
+the Sunday futures open, one gapping 24c through a 12c stop), the
+passive recorder kept collecting. The dataset grew to 1,765 scans over
+550 minutes and 1,512 markets — and on the full recording **Patient
+went negative: −$9.47, PF 0.47.** The morning's positive readings did
+not survive the evening's regime. That is precisely what "noise until
+it repeats" was for; it did not repeat, and this document says so in
+the same breath it reported the win.
+
+What holds at every dataset size: the ranking. Patient remains
+least-bad by a wide margin (defaults −$40.68 on the same data), its
+filter stack is worth +$10.76 of attribution (−$9.47 with, −$20.23
+without), the risk cap kept every stop near its design cost, and the
+day's live equity finished positive (+$6.93) even after the losing
+stints.
+
+The mechanism 1.9.1 adds came from both live loss clusters telling the
+same story: **the engine was trading markets it had only just met.**
+The regime filter abstained below nine samples — waving through exactly
+the markets it could not certify. With the filter on, a market now has
+to be watched for nine scans before it can be judged tradeable; a
+flat-but-well-observed book that wakes up still passes, because a quiet
+market breaking out is the one thing a momentum rule exists for. This
+reverses a deliberate earlier choice, and the test that encoded the old
+choice now encodes the evidence.

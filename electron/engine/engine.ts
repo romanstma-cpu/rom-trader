@@ -240,6 +240,13 @@ export class TradingEngine {
   private static readonly LOOKBACK = 3; // samples back for momentum
   private static readonly MAX_HISTORY = 20;
   private static readonly MAX_SIGNALS = 60;
+  /**
+   * Scans a market must be watched before the regime filter will judge it —
+   * lag1Autocorrelation needs eight changes, so nine prices. With the filter
+   * on, younger markets are refused rather than waved through: both live
+   * loss clusters were fills in markets the engine had known for a minute.
+   */
+  private static readonly MIN_REGIME_SAMPLES = 9;
 
   /**
    * The most of the trade budget a single stop-out may cost.
@@ -966,6 +973,21 @@ export class TradingEngine {
             `${roundTripFeeCentsPerContract(m.yes_ask).toFixed(1)}c round-trip fee by under ` +
             `${this.settings.minNetEdgeCents}c at ${m.yes_ask}c`;
         stats.skippedFees++;
+      } else if (
+        this.settings.regimeFilterEnabled &&
+        hist.length < TradingEngine.MIN_REGIME_SAMPLES
+      ) {
+        // The filter used to abstain on markets too young to measure — which
+        // waved through exactly the ones it could not certify. Both live loss
+        // clusters were that: index ladders traded within minutes of first
+        // entering the sweep at the futures open, crypto ladders at an hourly
+        // rollover. A filter that refuses unjudgeable regimes must refuse the
+        // unjudged. A flat-but-well-observed market still passes below: a
+        // quiet book waking up is the breakout a momentum rule exists for.
+        reason =
+          `seen for ${hist.length}/${TradingEngine.MIN_REGIME_SAMPLES} scans — too new for ` +
+          `the regime filter to judge`;
+        stats.skippedRegime++;
       } else if (
         this.settings.regimeFilterEnabled &&
         (autocorr = lag1Autocorrelation(hist.map((s) => s.mid))) !== null &&
