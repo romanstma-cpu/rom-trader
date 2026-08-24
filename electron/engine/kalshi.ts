@@ -269,6 +269,36 @@ export class KalshiClient {
   }
 
   /**
+   * Auth: rest a YES sell at a limit price and return the order id.
+   *
+   * The maker take-profit: post_only for the same reason as the entry side —
+   * an exit that crosses the book has become the taker fee it existed to
+   * avoid, and the caller would rather fall back to its market exit.
+   */
+  async placeLimitSell(ticker: string, count: number, yesPriceCents: number): Promise<string> {
+    const data = await this.request<{ order?: { order_id?: string } }>(
+      "POST",
+      "/portfolio/orders",
+      {
+        auth: true,
+        body: {
+          ticker,
+          client_order_id: crypto.randomUUID(),
+          side: "yes",
+          action: "sell",
+          count,
+          type: "limit",
+          yes_price: yesPriceCents,
+          post_only: true,
+        },
+      },
+    );
+    const id = data.order?.order_id;
+    if (!id) throw new Error("Kalshi accepted the order but returned no order id.");
+    return id;
+  }
+
+  /**
    * Auth: how a resting order is doing. Parsed defensively — the count fields
    * have shifted names across API revisions, and a fill mistaken for a
    * cancellation would strand a real position untracked.

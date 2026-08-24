@@ -987,6 +987,59 @@ reset();
   check("a taker run reports no maker orders", takerRun.maker === false && takerRun.ordersPlaced === 0);
 }
 
+section("maker take-profit exits");
+reset();
+{
+  const flat7 = [mkt("KXTP", 40, 41)];
+  const jump7 = [mkt("KXTP", 45, 46)]; // taker entry at 46c, target 46+12 = 58c
+
+  // Opening rests the sell at the target.
+  let e = runEngine({ makerExits: true }, [flat7, flat7, flat7, flat7, jump7]);
+  let p = e.getState().positions[0];
+  check("opening rests a take-profit sell", p?.tpRestingCents === 58, `${p?.tpRestingCents}`);
+
+  // A bid short of the target does not fill it — and does not trigger the
+  // instant exit either, because the resting order owns the target now.
+  e = runEngine({ makerExits: true }, [flat7, flat7, flat7, flat7, jump7, [mkt("KXTP", 57, 59)]]);
+  check("a bid under the target leaves it resting", e.getState().positions.length === 1);
+
+  // The bid paying up through the target fills at the target — not at the
+  // gapped bid — and pays no exit fee.
+  clearHistory();
+  e = runEngine({ makerExits: true }, [flat7, flat7, flat7, flat7, jump7, [mkt("KXTP", 61, 63)]]);
+  check("the bid crossing the target fills it", e.getState().positions.length === 0);
+  const fill = loadHistory()[0];
+  check("the fill is booked at the target", fill?.exitCents === 58, `${fill?.exitCents}`);
+  check("the fill is labelled a maker exit", fill?.reason === "take-profit (maker)");
+  // The whole win is gross minus the entry fee — the exit cost is zero.
+  const expected =
+    fill === undefined
+      ? NaN
+      : Math.round(((58 - 46) * fill.contracts - takerFeeUsd(fill.contracts, 46) * 100)) / 100;
+  check(
+    "a maker win pays no exit fee",
+    fill !== undefined && fill.pnlUsd === expected,
+    `${fill?.pnlUsd} vs ${expected}`,
+  );
+
+  // The taker route for the same move pays the exit fee — the whole point.
+  clearHistory();
+  e = runEngine({ makerExits: false }, [flat7, flat7, flat7, flat7, jump7, [mkt("KXTP", 61, 63)]]);
+  const takerFill = loadHistory()[0];
+  check(
+    "the taker route nets less on the same move",
+    takerFill !== undefined && fill !== undefined && takerFill.pnlUsd !== fill.pnlUsd,
+    `maker ${fill?.pnlUsd} vs taker ${takerFill?.pnlUsd}`,
+  );
+
+  // A stop-loss clears the resting target and exits at market.
+  clearHistory();
+  e = runEngine({ makerExits: true }, [flat7, flat7, flat7, flat7, jump7, [mkt("KXTP", 30, 31)]]);
+  check("a stop still fires with a target resting", e.getState().positions.length === 0);
+  check("the stop is the exit of record", loadHistory()[0]?.reason === "stop-loss");
+
+}
+
 section("regime filter");
 reset();
 {
@@ -1776,6 +1829,54 @@ void (async () => {
     const t1 = Date.now();
     await idle.drainLiveOrders(4000);
     check("an idle engine drains instantly", Date.now() - t1 < 100);
+  }
+
+  section("live take-profit plumbing");
+  reset();
+  {
+    const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+    const placed: string[] = [];
+    const cancelled: string[] = [];
+    type TpInternals = {
+      status: string;
+      cashUsd: number;
+      client: unknown;
+      positions: unknown[];
+      restTakeProfit: (p: unknown) => void;
+      attachTpOrderId: (p: unknown, id: string) => void;
+      closePosition: (p: unknown, reason: string) => void;
+    };
+    const live = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true, makerExits: true },
+      liveCreds,
+    ) as unknown as TpInternals;
+    live.status = "running";
+    live.cashUsd = 100;
+    live.client = {
+      hasAuth: true,
+      placeLimitSell: async (t: string) => (placed.push(t), "tp-order-1"),
+      placeOrder: async () => ({}),
+      cancelOrder: async (id: string) => void cancelled.push(id),
+    };
+    const livePos = {
+      ticker: "KXLTP", title: "t", side: "yes", entryCents: 40, contracts: 10,
+      currentBidCents: 41, peakMidCents: 41, unrealizedUsd: 0, entryFeeUsd: 0.1,
+      tpRestingCents: null as number | null, tpOrderId: null as string | null,
+      openedAt: Date.now(),
+    };
+    live.positions = [livePos];
+    live.restTakeProfit(livePos);
+    await new Promise((r) => setTimeout(r, 10)); // let the stubbed placement land
+    check("live mode places the resting sell", placed.includes("KXLTP"));
+    check("the order id is attached", livePos.tpOrderId === "tp-order-1");
+    live.closePosition(livePos, "stop-loss");
+    check("a stop cancels the resting sell at the exchange", cancelled.includes("tp-order-1"));
+
+    // The race guard: an id arriving for a gone position is cancelled.
+    const gone = { ...livePos, ticker: "KXGONE2", tpOrderId: null };
+    live.positions = [];
+    live.attachTpOrderId(gone, "late-tp");
+    check("a late take-profit id for a gone position is cancelled", cancelled.includes("late-tp"));
   }
 
   // ---------------------------------------------------------------- result

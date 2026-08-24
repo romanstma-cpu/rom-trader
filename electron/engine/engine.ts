@@ -30,6 +30,10 @@ export interface Position {
   unrealizedUsd: number;
   /** Taker fee already paid to open, carried so the exit can net it out. */
   entryFeeUsd: number;
+  /** Price of the resting take-profit sell, when maker exits are on. */
+  tpRestingCents: number | null;
+  /** Kalshi's id for that resting sell in live mode. */
+  tpOrderId: string | null;
   openedAt: number;
 }
 
@@ -592,6 +596,9 @@ export class TradingEngine {
       // sweep is the entire knowable world there, so replays and the playtest
       // harness mirror the five steps below, not this one.
       const managed = await this.refreshMissingMarkets(markets);
+      // Live-only, like the refresh above: paper take-profit fills come from
+      // the conservative rule inside updatePositions, which replays mirror.
+      await this.pollLiveTakeProfits();
       this.processPendingOrders(managed);
       this.updatePositions(managed);
       this.scanForEntries(managed, began);
@@ -806,42 +813,13 @@ export class TradingEngine {
       );
       return;
     }
+    // No exchange cancel for a resting take-profit here: settlement kills
+    // every resting order exchange-side, and cancelling a dead order would
+    // only log a scary warning about a race that never was.
+    p.tpRestingCents = null;
+    p.tpOrderId = null;
     const priceCents = result === "yes" ? 100 : 0;
-    const proceedsUsd = (priceCents * p.contracts) / 100;
-    const pnlUsd = round2(proceedsUsd - (p.entryCents * p.contracts) / 100 - p.entryFeeUsd);
-    this.cashUsd += proceedsUsd;
-    this.sessionRealizedUsd += pnlUsd;
-    this.positions = this.positions.filter((x) => x !== p);
-
-    const rec: TradeRecord = {
-      ticker: p.ticker,
-      title: p.title,
-      side: "yes",
-      entryCents: p.entryCents,
-      exitCents: priceCents,
-      contracts: p.contracts,
-      pnlUsd,
-      openedAt: p.openedAt,
-      closedAt: Date.now(),
-      reason: `settled ${result}`,
-      dryRun: !this.isLive,
-    };
-    try {
-      this.store.appendHistory(rec);
-    } catch (e) {
-      this.log("error", `Settlement could not be saved: ${(e as Error).message}`);
-    }
-    this.log(
-      "trade",
-      `SETTLE ${p.ticker} — ${p.contracts}x @ ${priceCents}c ` +
-        `(${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)}, settled ${result})`,
-    );
-    this.emitEvent({
-      kind: "closed",
-      tone: pnlUsd >= 0 ? "good" : "bad",
-      title: `${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)} · settled ${result}`,
-      body: `${p.ticker} — ${p.contracts} contracts settled at ${priceCents}c`,
-    });
+    this.bookExit(p, priceCents, 0, `settled ${result}`, false);
   }
 
   private updatePositions(markets: KalshiMarket[]): void {
@@ -859,7 +837,12 @@ export class TradingEngine {
       );
 
       const perContract = m.yes_bid - p.entryCents;
-      if (perContract >= this.settings.takeProfitCents) {
+      if (p.tpRestingCents !== null && !this.isLive && m.yes_bid >= p.tpRestingCents) {
+        // The conservative maker-fill rule, mirrored from entries: the sell
+        // fills only when the bid pays up to the target, and at the target —
+        // not at whatever the bid gapped to. Live fills come from polling.
+        this.fillTakeProfit(p);
+      } else if (p.tpRestingCents === null && perContract >= this.settings.takeProfitCents) {
         this.closePosition(p, "take-profit");
       } else if (perContract <= -this.settings.stopLossCents) {
         this.closePosition(p, "stop-loss");
@@ -1080,8 +1063,11 @@ export class TradingEngine {
           takerFeeUsd(contracts, m.yes_bid),
       ),
       entryFeeUsd,
+      tpRestingCents: null,
+      tpOrderId: null,
       openedAt: Date.now(),
     });
+    this.restTakeProfit(this.positions[this.positions.length - 1]);
     this.log(
       "trade",
       `OPEN ${m.ticker} — ${contracts}x YES @ ${m.yes_ask}c ` +
@@ -1256,8 +1242,11 @@ export class TradingEngine {
       // fresh fill at the bid shows one fee down, not a spread and two.
       unrealizedUsd: round2(((bid - o.limitCents) * filled) / 100 - takerFeeUsd(filled, bid)),
       entryFeeUsd: 0,
+      tpRestingCents: null,
+      tpOrderId: null,
       openedAt: Date.now(),
     });
+    this.restTakeProfit(this.positions[this.positions.length - 1]);
 
     this.log(
       "trade",
@@ -1347,17 +1336,21 @@ export class TradingEngine {
     this.stop();
   }
 
-  private closePosition(p: Position, reason: string): void {
-    if (this.isLive) {
-      this.trackLiveOp(
-        this.client
-          .placeOrder({ ticker: p.ticker, side: "yes", action: "sell", count: p.contracts })
-          .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`)),
-      );
-    }
-
-    const exitFeeUsd = takerFeeUsd(p.contracts, p.currentBidCents);
-    const proceedsUsd = (p.currentBidCents * p.contracts) / 100 - exitFeeUsd;
+  /**
+   * The one place an exit is booked, whatever kind it was.
+   *
+   * A taker close, a maker take-profit fill and a settlement differ only in
+   * the exit price and the fee; the bookkeeping is identical, and keeping
+   * three copies of it is how the copies start to disagree.
+   */
+  private bookExit(
+    p: Position,
+    exitCents: number,
+    exitFeeUsd: number,
+    reason: string,
+    cooldown: boolean,
+  ): void {
+    const proceedsUsd = (exitCents * p.contracts) / 100 - exitFeeUsd;
     // Both fees come out of the recorded result, so history and the equity
     // curve show what actually landed rather than a gross figure.
     const pnlUsd = round2(proceedsUsd - (p.entryCents * p.contracts) / 100 - p.entryFeeUsd);
@@ -1365,7 +1358,7 @@ export class TradingEngine {
     this.sessionRealizedUsd += pnlUsd;
 
     this.positions = this.positions.filter((x) => x !== p);
-    if (this.settings.reentryCooldownSeconds > 0) {
+    if (cooldown && this.settings.reentryCooldownSeconds > 0) {
       this.cooldownUntil.set(p.ticker, Date.now() + this.settings.reentryCooldownSeconds * 1000);
     }
     const rec: TradeRecord = {
@@ -1373,7 +1366,7 @@ export class TradingEngine {
       title: p.title,
       side: "yes",
       entryCents: p.entryCents,
-      exitCents: p.currentBidCents,
+      exitCents,
       contracts: p.contracts,
       pnlUsd,
       openedAt: p.openedAt,
@@ -1386,17 +1379,132 @@ export class TradingEngine {
     } catch (e) {
       this.log("error", `Trade closed but could not be saved: ${(e as Error).message}`);
     }
+    const verb = reason.startsWith("settled") ? "SETTLE" : "CLOSE";
     this.log(
       "trade",
-      `CLOSE ${p.ticker} — ${p.contracts}x @ ${p.currentBidCents}c ` +
+      `${verb} ${p.ticker} — ${p.contracts}x @ ${exitCents}c ` +
         `(${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)}, ${reason})`,
     );
     this.emitEvent({
       kind: "closed",
       tone: pnlUsd >= 0 ? "good" : "bad",
       title: `${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)} · ${reason}`,
-      body: `${p.ticker} — ${p.contracts} contracts at ${p.currentBidCents}c`,
+      body: `${p.ticker} — ${p.contracts} contracts at ${exitCents}c`,
     });
+  }
+
+  private closePosition(p: Position, reason: string): void {
+    // A resting take-profit must die with the position, or a real order sits
+    // at the exchange selling contracts this ledger no longer holds.
+    if (this.isLive && p.tpOrderId) {
+      this.trackLiveOp(
+        this.client.cancelOrder(p.tpOrderId).catch((e) => {
+          this.log(
+            "warn",
+            `Could not cancel the resting take-profit on ${p.ticker}: ${(e as Error).message}. ` +
+              `Check your Kalshi orders page.`,
+          );
+        }),
+      );
+    }
+    p.tpRestingCents = null;
+    p.tpOrderId = null;
+
+    if (this.isLive) {
+      this.trackLiveOp(
+        this.client
+          .placeOrder({ ticker: p.ticker, side: "yes", action: "sell", count: p.contracts })
+          .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`)),
+      );
+    }
+    this.bookExit(p, p.currentBidCents, takerFeeUsd(p.contracts, p.currentBidCents), reason, true);
+  }
+
+  /**
+   * Books a resting take-profit fill: exit at the target, no fee — the sell
+   * was the maker.
+   */
+  private fillTakeProfit(p: Position): void {
+    const tp = p.tpRestingCents ?? p.entryCents + this.settings.takeProfitCents;
+    p.tpRestingCents = null;
+    p.tpOrderId = null;
+    this.bookExit(p, tp, 0, "take-profit (maker)", true);
+  }
+
+  /**
+   * Rests the take-profit sell at the target the moment a position opens.
+   *
+   * A win that exits as a taker sells at the bid and pays the fee — two to
+   * three cents per contract handed back on every winner, on a strategy
+   * whose whole battle is with costs. Resting the sell fills at the target
+   * itself, fee-free. The stop-loss stays a taker: a stop that waits
+   * politely at the ask is not a stop.
+   */
+  private restTakeProfit(p: Position): void {
+    if (!this.settings.makerExits) return;
+    const tpCents = p.entryCents + this.settings.takeProfitCents;
+    if (tpCents >= 100) return; // nothing can rest at or beyond the dollar
+    p.tpRestingCents = tpCents;
+    if (this.isLive) {
+      this.trackLiveOp(
+        this.client
+          .placeLimitSell(p.ticker, p.contracts, tpCents)
+          .then((id) => this.attachTpOrderId(p, id))
+          .catch((e) => {
+            // Rejected (post_only would have crossed, market closing). Fall
+            // back to the instant taker exit rather than trade without one.
+            p.tpRestingCents = null;
+            this.log(
+              "warn",
+              `Could not rest the take-profit for ${p.ticker}: ${(e as Error).message} — ` +
+                `using a market exit at target instead.`,
+            );
+          }),
+      );
+    }
+  }
+
+  /** Same race guard as entry orders: a late id for a gone position is cancelled. */
+  private attachTpOrderId(p: Position, id: string): void {
+    if (this.positions.includes(p)) {
+      p.tpOrderId = id;
+      return;
+    }
+    this.trackLiveOp(
+      this.client.cancelOrder(id).catch((e) => {
+        this.log(
+          "warn",
+          `A take-profit order on ${p.ticker} was confirmed after its position closed, and ` +
+            `could not be cancelled at Kalshi: ${(e as Error).message}. Check your Kalshi orders page.`,
+        );
+      }),
+    );
+  }
+
+  /**
+   * Live mode only: asks Kalshi whether resting take-profits have filled.
+   * Paper fills come from the conservative rule in updatePositions instead;
+   * in live mode that rule stands down, because only one of the two moved
+   * real money.
+   */
+  private async pollLiveTakeProfits(): Promise<void> {
+    if (!this.isLive) return;
+    for (const p of [...this.positions]) {
+      if (!p.tpOrderId) continue;
+      try {
+        const st = await this.client.getOrder(p.tpOrderId);
+        if (st.status === "executed" || st.filledCount >= p.contracts) {
+          this.fillTakeProfit(p);
+        } else if (st.status === "canceled") {
+          // Cancelled outside this app; fall back to the instant taker exit.
+          p.tpOrderId = null;
+          p.tpRestingCents = null;
+          this.log("warn", `The resting take-profit on ${p.ticker} was cancelled on Kalshi — using a market exit at target instead.`);
+        }
+      } catch (e) {
+        this.log("warn", `Could not check the take-profit on ${p.ticker}: ${(e as Error).message}`);
+      }
+    }
   }
 
   /**

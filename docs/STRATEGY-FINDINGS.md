@@ -513,3 +513,31 @@ that has measured least-bad on every dataset — maker entries, strict
 gates, fewer trades — now hovering at zero instead of bleeding. The next
 soaks run Patient, and more hours of recording will say whether zero is
 where it lives or where it passed through.
+
+---
+
+# 1.9.0: the maker exit, built, measured, and left off
+
+The remaining fee lever: a winning exit sells at the bid and pays the
+taker fee — two to three cents per contract handed back on every winner.
+1.9.0 adds **makerExits**: the take-profit rests as a sell at the target
+from the moment a position opens, fills at the target fee-free, and dies
+with the position on any other exit. Stops are untouched — a stop that
+waits politely at the ask is not a stop. Live mode places real post_only
+sells, polls them, cancels them when the position closes another way,
+and carries the same late-id race guard as entries.
+
+Measured on the full recording (476 scans, 4 segments): **no advantage.**
+Defaults −$25.22 without vs −$26.16 with; Patient +$6.80 without vs
++$5.79 with. The mechanism explanation cuts both ways: on 15-second data
+the instant taker exit sells at bids that gap *past* the target, and
+that overshoot roughly pays the fee it costs. So the feature ships off
+by default, because the measurement outranks the theory that motivated
+it. One honest caveat, recorded rather than acted on: the conservative
+paper fill model cannot credit real queue fills at a merely-touched
+target, so live maker exits likely do somewhat better than paper shows.
+A future live soak can say.
+
+Same table, the headline: **Patient at PF 1.43, +$6.80, 65% win over 20
+trades** — strengthening as the recording grows, still a small sample,
+still not a promise. The soaks continue.

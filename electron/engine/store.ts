@@ -74,6 +74,14 @@ export interface Settings {
    */
   requireTradeActivity: boolean;
   /**
+   * Rest the take-profit sell at the target instead of exiting as a taker.
+   *
+   * A taker win sells at the bid and pays the fee — two to three cents per
+   * contract handed back on every winner. The resting sell fills at the
+   * target itself, fee-free. The stop-loss is unaffected and stays a taker.
+   */
+  makerExits: boolean;
+  /**
    * Refuse entries in markets closing within this many minutes. 0 disables.
    *
    * The sweep universe is markets closing within two hours, so without this
@@ -184,6 +192,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // per-trade loss of the old defaults. See docs/STRATEGY-FINDINGS.md.
   momentumOnBid: true,
   requireTradeActivity: true,
+  makerExits: false,
   minMinutesToClose: 30,
 };
 
@@ -294,6 +303,7 @@ function sanitize(s: Settings): Settings {
     maxDrawdownPct: num(s.maxDrawdownPct, 0, 95, DEFAULT_SETTINGS.maxDrawdownPct),
     momentumOnBid: Boolean(s.momentumOnBid),
     requireTradeActivity: Boolean(s.requireTradeActivity),
+    makerExits: Boolean(s.makerExits),
     minMinutesToClose: num(s.minMinutesToClose, 0, 115, DEFAULT_SETTINGS.minMinutesToClose),
   };
 }

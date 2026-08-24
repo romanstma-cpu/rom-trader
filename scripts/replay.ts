@@ -247,6 +247,10 @@ function main(): void {
     ),
     replay(segs, { ...base, requireTradeActivity: false }, "taker, bid gate only"),
     replay(segs, { ...base, momentumOnBid: false }, "taker, volume gate only"),
+    // The maker exit: winners fill at the target fee-free instead of selling
+    // at the bid and paying the taker fee. Measured before it defaults.
+    replay(segs, { ...base, makerExits: true }, "defaults + maker TP"),
+    replay(segs, { ...patient, makerExits: true }, "Patient + maker TP"),
   ];
 
   console.log("");

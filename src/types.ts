@@ -7,6 +7,7 @@ export interface Position {
   currentBidCents: number;
   peakMidCents: number;
   unrealizedUsd: number;
+  tpRestingCents: number | null;
   openedAt: number;
 }
 
@@ -108,6 +109,7 @@ export interface Settings {
   maxDrawdownPct: number;
   momentumOnBid: boolean;
   requireTradeActivity: boolean;
+  makerExits: boolean;
   minMinutesToClose: number;
 }
 

@@ -73,7 +73,14 @@ export default function Positions({ state }: { state: EngineState | null }) {
                         {move}c
                       </span>
                     </td>
-                    <td className="muted">{Math.round(p.peakMidCents)}c</td>
+                    <td className="muted">
+                      {Math.round(p.peakMidCents)}c
+                      {p.tpRestingCents !== null && (
+                        <div className="sub" title="A sell is resting at your target — it fills there fee-free.">
+                          sell resting @ {p.tpRestingCents}c
+                        </div>
+                      )}
+                    </td>
                     <td className={pnlClass(p.unrealizedUsd)}>{signedMoney(p.unrealizedUsd)}</td>
                     <td className="muted">{timeAgo(p.openedAt)}</td>
                   </tr>

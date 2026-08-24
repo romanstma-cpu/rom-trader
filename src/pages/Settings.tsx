@@ -354,6 +354,12 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           <span className="hint">How entries reach the book</span>
         </div>
         <Toggle
+          label="Rest the take-profit at the target (maker exit)"
+          help="A winning exit normally sells at the bid and pays the taker fee — two to three cents per contract handed back on every winner. This rests the sell at your target instead: it fills at the target itself, fee-free. Stop-losses still exit at market immediately."
+          checked={settings.makerExits}
+          onChange={(v) => update({ makerExits: v })}
+        />
+        <Toggle
           label="Enter with resting limit orders (maker)"
           help="Rest a buy at the bid instead of crossing to the ask. No taker fee and no spread paid on entry — the two costs that dominated every simulation. The trade-off: fills are not guaranteed, and the ones that arrive come when the price dips back to your bid."
           checked={settings.makerEntries}
