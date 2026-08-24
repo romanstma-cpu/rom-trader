@@ -566,11 +566,20 @@ reset();
   // Before 1.7.1 start() cleared the banner and the first scan re-halted, so
   // the button looked dead. It must refuse up front instead.
   const e = new TradingEngine({ ...DEFAULT_SETTINGS, dailyLossLimitUsd: 25 });
+  const refusals: { kind: string; title: string }[] = [];
+  e.subscribe({ onState: () => {}, onLog: () => {}, onEvent: (ev) => refusals.push(ev) });
   check("a blocked engine refuses to start", (e.start(), e.getState().status === "stopped"));
   check(
     "the refusal names the way out",
     (e.getState().haltedReason ?? "").includes("Resume"),
     e.getState().haltedReason ?? "",
+  );
+  // From the tray there is no banner, so the refusal must also be an event —
+  // that is what becomes the Windows toast.
+  check(
+    "the refusal raises an event for the tray",
+    refusals.some((ev) => ev.kind === "halted" && ev.title.includes("did not start")),
+    JSON.stringify(refusals),
   );
 
   // Resume: the limit is untouched, but its allowance restarts from now.

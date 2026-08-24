@@ -450,6 +450,14 @@ export class TradingEngine {
     if (blocked) {
       this.haltedReason = blocked;
       this.log("warn", blocked);
+      // An event, not just a banner: from the tray there is no banner, and a
+      // Start click that silently does nothing reads as a dead button.
+      this.emitEvent({
+        kind: "halted",
+        tone: "bad",
+        title: "ROM Trader did not start",
+        body: blocked,
+      });
       this.emitState();
       return;
     }

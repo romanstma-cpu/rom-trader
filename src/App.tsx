@@ -87,11 +87,21 @@ export default function App() {
       if (running) {
         await window.rom.engine.stop();
         toast("info", "Engine stopped. Open positions were closed at the current bid.");
+        await refresh();
       } else {
         await window.rom.engine.start();
-        toast("ok", state?.dryRun ? "Engine started in dry-run mode." : "Engine started in LIVE mode.");
+        // start() can refuse — a brake may already be tripped — so believe
+        // the engine's answer, not the button that was pressed. Toasting
+        // "started" over a stopped engine is how a safety feature reads as a
+        // dead button.
+        const after = await window.rom.engine.getState();
+        setState(after);
+        if (after.status === "running") {
+          toast("ok", after.dryRun ? "Engine started in dry-run mode." : "Engine started in LIVE mode.");
+        } else {
+          toast("bad", after.haltedReason ?? "The engine did not start.");
+        }
       }
-      await refresh();
     } catch (e) {
       toast("bad", (e as Error).message);
     } finally {

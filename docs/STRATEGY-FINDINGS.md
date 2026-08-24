@@ -421,3 +421,25 @@ orphaned.
 the pre-1.4.0 take-profit of 6c — under the fee floor those defaults were
 specifically moved past. Fallbacks now reference the shipped defaults
 directly.
+
+---
+
+# 1.7.3: the app must not die for a logged sin, or lie about starting
+
+**One escaped promise rejection killed the whole app.** The global
+`unhandledRejection` handler called the same fatal path as a startup
+failure: an error dialog titled "failed to start" and a hard exit — while
+the engine could be mid-session with positions open. The engine catches
+its failures diligently, but a policy of "one missed catch anywhere ends
+the trading session" is the wrong blast radius for a money app. A stray
+rejection is now logged to crash.log and survived; uncaught exceptions
+still exit (the process genuinely cannot be trusted after one), behind a
+dialog that no longer claims a running app failed to start.
+
+**The Start button toasted "Engine started" over a refusal.** `start()`
+can decline when a brake is already tripped; the UI toasted success
+anyway, over a stopped engine — success theatre stacked on top of a
+safety refusal. The UI now believes the engine's answer, and a refusal
+also raises an engine event, so starting from the tray — where there is
+no banner — produces a Windows toast naming the reason instead of a
+button that silently does nothing.

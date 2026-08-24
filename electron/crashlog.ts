@@ -28,7 +28,7 @@ function describe(err: unknown): string {
   return String(err);
 }
 
-export function reportFatal(err: unknown, origin: string): void {
+function writeEntry(err: unknown, origin: string): string {
   const file = logPath();
   const entry =
     // ASCII only: this file gets opened in whatever editor the reader has.
@@ -36,19 +36,23 @@ export function reportFatal(err: unknown, origin: string): void {
     `ROM Trader ${app.getVersion()} | Electron ${process.versions.electron} | ` +
     `${os.platform()} ${os.release()} (${process.arch})\n` +
     `${describe(err)}\n`;
-
   try {
     fs.appendFileSync(file, entry);
   } catch {
-    // disk is unwritable; the dialog below is all we have left
+    // disk is unwritable; whatever the caller shows is all we have left
   }
+  return file;
+}
+
+export function reportFatal(err: unknown, origin: string): void {
+  const file = writeEntry(err, origin);
 
   // Only the first failure is worth a dialog — cascading errors would stack boxes.
   if (reported) return;
   reported = true;
 
   dialog.showErrorBox(
-    "ROM Trader failed to start",
+    "ROM Trader hit a fatal error",
     `${describe(err)}\n\n` +
       `Details were written to:\n${file}\n\n` +
       `Send that file to whoever set this up and they can fix it.`,
@@ -56,7 +60,20 @@ export function reportFatal(err: unknown, origin: string): void {
   app.exit(1);
 }
 
+/** Logged and survived — for failures that do not justify killing the app. */
+export function reportBackground(err: unknown, origin: string): void {
+  writeEntry(err, origin);
+}
+
 export function installCrashHandlers(): void {
+  // An uncaught exception leaves the process in a state Node explicitly says
+  // not to trust, so exiting is right — with an accurate dialog, not one that
+  // claims a running app "failed to start".
   process.on("uncaughtException", (err) => reportFatal(err, "uncaughtException"));
-  process.on("unhandledRejection", (err) => reportFatal(err, "unhandledRejection"));
+  // A stray promise rejection is a bug worth a log line, not an execution.
+  // Before 1.7.3 this path hard-exited the app: one missed .catch anywhere,
+  // and a trading session died mid-position behind a startup-failure dialog.
+  // Genuine startup failures still exit — the whenReady chain reports them
+  // through reportFatal explicitly.
+  process.on("unhandledRejection", (err) => reportBackground(err, "unhandledRejection"));
 }
