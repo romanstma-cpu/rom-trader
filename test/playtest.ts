@@ -1402,6 +1402,115 @@ reset();
   check("engine still reaches the stopped state", e.getState().status === "stopped");
 }
 
+// ---------------------------------------------------------------- settlement & live orders
+
+section("settlement bookkeeping");
+reset();
+{
+  const posFor = (ticker: string) => ({
+    ticker, title: "t", side: "yes" as const, entryCents: 40, contracts: 20,
+    currentBidCents: 41, peakMidCents: 41, unrealizedUsd: 0, entryFeeUsd: 0.25,
+    openedAt: Date.now(),
+  });
+  type Settleable = {
+    status: string;
+    cashUsd: number;
+    positions: unknown[];
+    settlePosition: (p: unknown, result: string) => void;
+  };
+
+  // YES settles at 100c: full payout, no exit fee — settlement is not a sale.
+  let e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  let anyE = e as unknown as Settleable;
+  anyE.status = "running";
+  anyE.cashUsd = 90;
+  const winner = posFor("KXWIN");
+  anyE.positions = [winner];
+  anyE.settlePosition(winner, "yes");
+  check("a yes settlement pays out at 100c", e.getState().cashUsd === 110, `${e.getState().cashUsd}`);
+  check("the position is gone", e.getState().positions.length === 0);
+  const settled = loadHistory().find((t) => t.ticker === "KXWIN");
+  check("the trade is recorded as settled", settled?.reason === "settled yes");
+  check("settlement pays no exit fee", settled?.pnlUsd === 11.75, `${settled?.pnlUsd}`);
+  check("the exit price is the settlement", settled?.exitCents === 100);
+
+  // NO settles at 0c: the position expires worthless.
+  e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  anyE = e as unknown as Settleable;
+  anyE.status = "running";
+  anyE.cashUsd = 90;
+  const loser = posFor("KXLOSE");
+  anyE.positions = [loser];
+  anyE.settlePosition(loser, "no");
+  check("a no settlement pays nothing", e.getState().cashUsd === 90);
+  check("the loss is the whole entry plus its fee",
+    loadHistory().find((t) => t.ticker === "KXLOSE")?.pnlUsd === -8.25);
+
+  // A settlement without a yes/no result must wait, not guess.
+  e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  anyE = e as unknown as Settleable;
+  anyE.status = "running";
+  const odd = posFor("KXODD");
+  anyE.positions = [odd];
+  anyE.settlePosition(odd, "void");
+  check("an unclear result leaves the position alone", e.getState().positions.length === 1);
+  check("and books nothing", !loadHistory().some((t) => t.ticker === "KXODD"));
+}
+
+section("live resting orders are never abandoned");
+reset();
+{
+  const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+  const pending = (orderId: string | null) => ({
+    ticker: "KXLIVE", title: "t", side: "yes" as const, limitCents: 40, contracts: 10,
+    costUsd: 4, placedAt: Date.now(), ticksLeft: 3, orderId,
+  });
+  type OrderInternals = {
+    client: { cancelOrder: (id: string) => Promise<void>; hasAuth: boolean };
+    cashUsd: number;
+    pendingOrders: unknown[];
+    cancelPending: (o: unknown, why: string) => void;
+    attachOrderId: (o: unknown, id: string) => void;
+  };
+
+  // cancelPending must kill the real order, not just the paper reservation —
+  // this is the path stop() and flatten() go through.
+  const cancelled: string[] = [];
+  const e = new TradingEngine({ ...DEFAULT_SETTINGS, liveMode: true }, liveCreds);
+  const anyE = e as unknown as OrderInternals;
+  anyE.client = { cancelOrder: async (id) => void cancelled.push(id), hasAuth: true };
+  anyE.cashUsd = 96;
+  const o = pending("real-order-1");
+  anyE.pendingOrders = [o];
+  anyE.cancelPending(o, "test");
+  check("cancelling locally cancels at the exchange", cancelled.includes("real-order-1"), cancelled.join(","));
+  check("and the reservation is refunded", e.getState().cashUsd === 100);
+
+  // The placement race: the exchange confirms an order we already dropped.
+  const orphan = pending(null);
+  anyE.attachOrderId(orphan, "late-arrival");
+  check("a late order id for a dropped order is cancelled", cancelled.includes("late-arrival"));
+
+  const tracked = pending(null);
+  anyE.pendingOrders = [tracked];
+  anyE.attachOrderId(tracked, "on-time");
+  check("a late id for a live order is attached", (tracked as { orderId: string | null }).orderId === "on-time");
+  check("— and not cancelled", !cancelled.includes("on-time"));
+}
+
+section("sanitise fallbacks track the shipped defaults");
+reset();
+{
+  // The hardcoded fallbacks drifted once: NaN take-profit fell back to the
+  // pre-1.4.0 value of 6c, under the fee floor the defaults were moved past.
+  saveSettings({ ...DEFAULT_SETTINGS, takeProfitCents: NaN, stopLossCents: NaN });
+  const s = loadSettings();
+  check("NaN take-profit falls back to the current default",
+    s.takeProfitCents === DEFAULT_SETTINGS.takeProfitCents, `${s.takeProfitCents}`);
+  check("NaN stop-loss falls back to the current default",
+    s.stopLossCents === DEFAULT_SETTINGS.stopLossCents, `${s.stopLossCents}`);
+}
+
 // ---------------------------------------------------------------- factory reset
 
 section("factory reset");
@@ -1418,12 +1527,95 @@ recordScan([mkt("KXZ", 40, 41)]);
 factoryReset();
 check("reset deletes the scan recording", !fs.existsSync(path.join(dataDir(), "scans.jsonl")));
 
-// ---------------------------------------------------------------- result
+// ---------------------------------------------------------------- async tail
+//
+// refreshMissingMarkets awaits the Kalshi client, so its checks need an await
+// of their own. Everything above runs synchronously first; the summary and
+// exit live inside this closer so no result is printed before these land.
 
-console.log(`\n${"=".repeat(52)}`);
-console.log(`${passed} passed, ${failures.length} failed`);
-if (failures.length > 0) {
-  console.log("\nFailures:");
-  for (const f of failures) console.log(`  - ${f}`);
-}
-process.exit(failures.length === 0 ? 0 : 1);
+void (async () => {
+  section("held markets are never blind");
+  reset();
+  {
+    const posFor = (ticker: string) => ({
+      ticker, title: "t", side: "yes" as const, entryCents: 40, contracts: 20,
+      currentBidCents: 41, peakMidCents: 41, unrealizedUsd: 0, entryFeeUsd: 0.25,
+      openedAt: Date.now(),
+    });
+    type RefreshInternals = {
+      status: string;
+      cashUsd: number;
+      positions: unknown[];
+      pendingOrders: unknown[];
+      client: unknown;
+      refreshMissingMarkets: (m: Mkt[]) => Promise<Mkt[]>;
+    };
+    const engineWithClient = (client: unknown): RefreshInternals => {
+      const e = new TradingEngine({ ...DEFAULT_SETTINGS }) as unknown as RefreshInternals;
+      e.status = "running";
+      e.client = client;
+      return e;
+    };
+
+    // A held market missing from the sweep gets fetched and managed normally.
+    let anyE = engineWithClient({
+      getMarket: async (t: string) => ({ market: mkt(t, 44, 45), status: "open", result: "" }),
+      hasAuth: false,
+    });
+    anyE.positions = [posFor("KXGONE")];
+    const topped = await anyE.refreshMissingMarkets([mkt("KXOTHER", 50, 51)]);
+    check("a held market missing from the sweep is fetched",
+      topped.some((m) => m.ticker === "KXGONE" && m.yes_bid === 44));
+    check("the sweep itself is untouched", topped.some((m) => m.ticker === "KXOTHER"));
+
+    // A ticker still in the sweep is not fetched twice.
+    let fetches = 0;
+    anyE = engineWithClient({
+      getMarket: async (t: string) => (fetches++, { market: mkt(t, 44, 45), status: "open", result: "" }),
+      hasAuth: false,
+    });
+    anyE.positions = [posFor("KXHERE")];
+    await anyE.refreshMissingMarkets([mkt("KXHERE", 40, 41)]);
+    check("a market still in the sweep is not re-fetched", fetches === 0, `${fetches}`);
+
+    // Settlement arriving through the refresh books the position and frees
+    // any resting order on the same market.
+    anyE = engineWithClient({
+      getMarket: async () => ({ market: mkt("KXDONE", 0, 0), status: "settled", result: "yes" }),
+      hasAuth: false,
+    });
+    anyE.cashUsd = 90;
+    anyE.positions = [posFor("KXDONE")];
+    anyE.pendingOrders = [{
+      ticker: "KXDONE", title: "t", side: "yes", limitCents: 40, contracts: 5,
+      costUsd: 2, placedAt: Date.now(), ticksLeft: 3, orderId: null,
+    }];
+    await anyE.refreshMissingMarkets([]);
+    check("a settlement found by the refresh is booked",
+      loadHistory().some((t) => t.ticker === "KXDONE" && t.reason === "settled yes"));
+    check("its resting order is released too", anyE.pendingOrders.length === 0);
+    check("payout and refund both reach cash", Math.round(anyE.cashUsd * 100) / 100 === 112, `${anyE.cashUsd}`);
+
+    // A failed fetch must not fail the tick — the position just waits.
+    anyE = engineWithClient({
+      getMarket: async () => {
+        throw new Error("api down");
+      },
+      hasAuth: false,
+    });
+    anyE.positions = [posFor("KXDOWN")];
+    const survived = await anyE.refreshMissingMarkets([]);
+    check("a failed refresh leaves the position for next scan",
+      anyE.positions.length === 1 && survived.length === 0);
+  }
+
+  // ---------------------------------------------------------------- result
+
+  console.log(`\n${"=".repeat(52)}`);
+  console.log(`${passed} passed, ${failures.length} failed`);
+  if (failures.length > 0) {
+    console.log("\nFailures:");
+    for (const f of failures) console.log(`  - ${f}`);
+  }
+  process.exit(failures.length === 0 ? 0 : 1);
+})();

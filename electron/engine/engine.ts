@@ -519,9 +519,14 @@ export class TradingEngine {
       // Recorded before any decision is made, so a replay sees exactly what
       // this tick saw. Only for live sweeps — a replay must not record itself.
       this.record?.(markets);
-      this.processPendingOrders(markets);
-      this.updatePositions(markets);
-      this.scanForEntries(markets, began);
+      // The sweep is the top of the volume table; what the engine holds may
+      // not be on it any more. Deliberately absent from backtests: a recorded
+      // sweep is the entire knowable world there, so replays and the playtest
+      // harness mirror the five steps below, not this one.
+      const managed = await this.refreshMissingMarkets(markets);
+      this.processPendingOrders(managed);
+      this.updatePositions(managed);
+      this.scanForEntries(managed, began);
       this.enforceDailyLossLimit();
       this.enforceLosingStreak();
       this.enforceMaxDrawdown();
@@ -657,6 +662,106 @@ export class TradingEngine {
 
   private mid(m: KalshiMarket): number {
     return m.yes_bid > 0 && m.yes_ask > 0 ? (m.yes_bid + m.yes_ask) / 2 : m.last_price;
+  }
+
+  /**
+   * Fetches quotes for anything held that the sweep no longer covers.
+   *
+   * The sweep is the top forty by volume among markets closing within two
+   * hours — so every held market is guaranteed to leave it eventually, by
+   * closing if nothing else. Before 1.7.2 a position whose market left the
+   * sweep went blind: the bid froze at its last seen value, the stop-loss
+   * could never fire, and a market that settled was carried at a stale quote
+   * instead of the 100c or 0c that actually happened to the money.
+   */
+  private async refreshMissingMarkets(markets: KalshiMarket[]): Promise<KalshiMarket[]> {
+    const seen = new Set(markets.map((m) => m.ticker));
+    const held = [
+      ...this.positions.map((p) => p.ticker),
+      ...this.pendingOrders.map((o) => o.ticker),
+    ].filter((t, i, a) => !seen.has(t) && a.indexOf(t) === i);
+    if (held.length === 0) return markets;
+
+    const out = [...markets];
+    for (const ticker of held) {
+      try {
+        const { market, status, result } = await this.client.getMarket(ticker);
+        if (status === "settled") {
+          // A resting order in a settled market can never fill; release it.
+          for (const o of this.pendingOrders.filter((x) => x.ticker === ticker)) {
+            this.cancelPending(o, "market settled before the order filled");
+          }
+          const p = this.positions.find((x) => x.ticker === ticker);
+          if (p) this.settlePosition(p, result);
+        } else if (market.yes_bid > 0 || market.yes_ask > 0) {
+          // Still quoted — hand it to the normal management path so stops,
+          // targets and fills work exactly as if it were still in the sweep.
+          out.push(market);
+        }
+        // "closed" (trading over, settlement pending) has no book and no
+        // exit; nothing to do until the settlement lands.
+      } catch (e) {
+        // One missing quote must not fail the whole tick; ask again next scan.
+        this.log("warn", `Could not refresh ${ticker}: ${(e as Error).message}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Books a settlement: YES paid out at 100c, or expired worthless at 0c.
+   *
+   * Not a sale — no bid is involved and no taker fee applies. Kalshi charges
+   * trading fees on executions, not on settlement, so the only costs in this
+   * trade are the ones already paid on the way in.
+   */
+  private settlePosition(p: Position, result: string): void {
+    if (result !== "yes" && result !== "no") {
+      // Voided, or settled without a reported result yet. Booking a guess
+      // would be worse than waiting; the next refresh asks again.
+      this.log(
+        "warn",
+        `${p.ticker} reports settled with result "${result || "unknown"}" — holding the ` +
+          `position until Kalshi says yes or no.`,
+      );
+      return;
+    }
+    const priceCents = result === "yes" ? 100 : 0;
+    const proceedsUsd = (priceCents * p.contracts) / 100;
+    const pnlUsd = round2(proceedsUsd - (p.entryCents * p.contracts) / 100 - p.entryFeeUsd);
+    this.cashUsd += proceedsUsd;
+    this.sessionRealizedUsd += pnlUsd;
+    this.positions = this.positions.filter((x) => x !== p);
+
+    const rec: TradeRecord = {
+      ticker: p.ticker,
+      title: p.title,
+      side: "yes",
+      entryCents: p.entryCents,
+      exitCents: priceCents,
+      contracts: p.contracts,
+      pnlUsd,
+      openedAt: p.openedAt,
+      closedAt: Date.now(),
+      reason: `settled ${result}`,
+      dryRun: !this.isLive,
+    };
+    try {
+      this.store.appendHistory(rec);
+    } catch (e) {
+      this.log("error", `Settlement could not be saved: ${(e as Error).message}`);
+    }
+    this.log(
+      "trade",
+      `SETTLE ${p.ticker} — ${p.contracts}x @ ${priceCents}c ` +
+        `(${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)}, settled ${result})`,
+    );
+    this.emitEvent({
+      kind: "closed",
+      tone: pnlUsd >= 0 ? "good" : "bad",
+      title: `${pnlUsd >= 0 ? "+" : ""}${money(pnlUsd)} · settled ${result}`,
+      body: `${p.ticker} — ${p.contracts} contracts settled at ${priceCents}c`,
+    });
   }
 
   private updatePositions(markets: KalshiMarket[]): void {
@@ -933,9 +1038,7 @@ export class TradingEngine {
     if (this.isLive) {
       void this.client
         .placeLimitBuy(m.ticker, contracts, limitCents)
-        .then((id) => {
-          order.orderId = id;
-        })
+        .then((id) => this.attachOrderId(order, id))
         .catch((e) => {
           // Kalshi refused (post_only would have crossed, insufficient funds,
           // closed market). The paper-side reservation must be unwound or the
@@ -950,6 +1053,29 @@ export class TradingEngine {
         `${this.settings.makerTtlTicks} scans to fill)` +
         (factor < 0.999 ? ` [size scaled to ${Math.round(factor * 100)}% by drawdown]` : ""),
     );
+  }
+
+  /**
+   * Records the exchange's id for a just-placed resting order.
+   *
+   * Placement is async and local bookkeeping is not: the order can expire or
+   * be cancelled here before Kalshi answers. When the id arrives for an order
+   * no longer tracked, the only safe move is to cancel it at the exchange too
+   * — otherwise a real order rests, and possibly fills, with nothing
+   * watching it.
+   */
+  private attachOrderId(order: PendingOrder, id: string): void {
+    if (this.pendingOrders.includes(order)) {
+      order.orderId = id;
+      return;
+    }
+    void this.client.cancelOrder(id).catch((e) => {
+      this.log(
+        "warn",
+        `A resting order on ${order.ticker} was confirmed after being cancelled locally, and ` +
+          `could not be cancelled at Kalshi: ${(e as Error).message}. Check your Kalshi orders page.`,
+      );
+    });
   }
 
   /**
@@ -972,18 +1098,7 @@ export class TradingEngine {
         // Live fills come from Kalshi's answer, never from the paper rule: the
         // two can disagree, and only one of them moved real money.
         if (o.ticksLeft <= 0) {
-          if (o.orderId) {
-            void this.client.cancelOrder(o.orderId).catch((e) => {
-              // Most likely the order filled in the race between our decision
-              // and the cancel. The next poll of positions will not see it,
-              // so tell the user to look rather than guessing.
-              this.log(
-                "warn",
-                `Could not cancel resting order on ${o.ticker}: ${(e as Error).message}. ` +
-                  `Check your Kalshi orders page.`,
-              );
-            });
-          }
+          // cancelPending also cancels the real order at Kalshi.
           this.cancelPending(o, "unfilled when its time ran out");
         } else if (o.orderId) {
           void this.pollLiveOrder(o, byTicker.get(o.ticker) ?? null);
@@ -1057,11 +1172,26 @@ export class TradingEngine {
     });
   }
 
-  /** Removes a resting order and returns its reserved cash. */
+  /** Removes a resting order, returns its reserved cash, and kills the real order. */
   private cancelPending(o: PendingOrder, why: string): void {
     if (!this.pendingOrders.includes(o)) return;
     this.pendingOrders = this.pendingOrders.filter((x) => x !== o);
     this.cashUsd += o.costUsd;
+    // The real order has to die with the paper one. Before 1.7.2 only the
+    // TTL path cancelled at Kalshi, so stop() and flatten() dropped live
+    // resting orders from the books here while leaving them resting — and
+    // able to fill — at the exchange, with nothing watching them.
+    if (this.isLive && o.orderId) {
+      void this.client.cancelOrder(o.orderId).catch((e) => {
+        // Most likely the order filled in the race between our decision and
+        // the cancel. Tell the user to look rather than guessing.
+        this.log(
+          "warn",
+          `Could not cancel resting order on ${o.ticker}: ${(e as Error).message}. ` +
+            `Check your Kalshi orders page.`,
+        );
+      });
+    }
     this.log("info", `EXPIRE ${o.ticker} — ${o.contracts}x limit ${o.limitCents}c: ${why}`);
   }
 

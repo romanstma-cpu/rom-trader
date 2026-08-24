@@ -390,3 +390,34 @@ History page can also clear just the paper trades or just the live ones.
 None of this changes a measurement in this document. It changes whether
 the safety features can be lived with, which is what decides if anyone
 leaves them switched on.
+
+---
+
+# 1.7.2: positions were going blind at the finish line
+
+An audit pass found four defects, one of which quietly corrupted results.
+
+**Held markets left the sweep, and the engine stopped seeing them.** The
+scan covers the top forty by volume among markets closing within two hours
+— so every held market is guaranteed to leave it, by closing if nothing
+else. Once gone, the bid froze, the stop-loss could never fire, and a
+market that settled was carried at its stale quote instead of the 100c or
+0c that actually happened to the money. The engine now fetches quotes for
+anything it holds that the sweep missed, manages it exactly as before, and
+**books settlements properly**: YES at 100c, NO at 0c, no exit fee —
+settlement is not a sale, and Kalshi charges nothing for it. This corrects
+results in the flattering direction as often as not: a winner that rode to
+a YES settlement was previously credited only its last stale bid.
+
+**Live resting orders were abandoned at the exchange.** Only the TTL path
+cancelled the real order; `stop()` and `flatten()` released the paper
+reservation and told the user the order was cancelled while it kept
+resting — and could keep filling — at Kalshi. Every local cancellation now
+cancels at the exchange too, and an order id that arrives from Kalshi
+after the local order was dropped is cancelled on arrival rather than
+orphaned.
+
+**Sanitise fallbacks had drifted.** A corrupted settings file fell back to
+the pre-1.4.0 take-profit of 6c — under the fee floor those defaults were
+specifically moved past. Fallbacks now reference the shipped defaults
+directly.

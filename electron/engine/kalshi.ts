@@ -112,6 +112,37 @@ export class KalshiClient {
       .slice(0, limit);
   }
 
+  /**
+   * Public: one market by ticker, whatever its status.
+   *
+   * The sweep only sees the top of the volume table, but a held position's
+   * market can slide off it — or close and settle — while the position is
+   * still open. This is how the engine keeps eyes on what it holds.
+   */
+  async getMarket(
+    ticker: string,
+  ): Promise<{ market: KalshiMarket; status: string; result: string }> {
+    const data = await this.request<{ market: RawMarket & { result?: string } }>(
+      "GET",
+      `/markets/${encodeURIComponent(ticker)}`,
+    );
+    const m = data.market ?? ({} as RawMarket & { result?: string });
+    return {
+      market: {
+        ticker: m.ticker ?? ticker,
+        title: m.title ?? ticker,
+        yes_bid: toCents(m.yes_bid_dollars),
+        yes_ask: toCents(m.yes_ask_dollars),
+        last_price: toCents(m.last_price_dollars),
+        volume: parseFloat(m.volume_fp ?? "0") || 0,
+        volume_24h: parseFloat(m.volume_24h_fp ?? "0") || 0,
+        status: m.status ?? "unknown",
+      },
+      status: m.status ?? "unknown",
+      result: m.result ?? "",
+    };
+  }
+
   /** Auth: account balance in USD. */
   async getBalance(): Promise<number> {
     const data = await this.request<{ balance: number }>("GET", "/portfolio/balance", {
