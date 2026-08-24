@@ -541,3 +541,33 @@ A future live soak can say.
 Same table, the headline: **Patient at PF 1.43, +$6.80, 65% win over 20
 trades** — strengthening as the recording grows, still a small sample,
 still not a promise. The soaks continue.
+
+---
+
+# The first positive live session
+
+Three hours of the 1.9.0 build running the Patient preset, paper cash,
+every 1.8.0 mechanism active. **24 trades, +$16.05. Eighteen
+take-profits (+$29.32) against six stop-losses (−$13.27): 75% win rate,
+profit factor 2.21, +$0.67 per trade.** The wins were spread across
+several hourly ladders, not one lucky market; the losing hour (the
+07:00 BTC ladder, −$5.90) was carried by the others. Every stop cost
+about $2.21 — the risk cap holding, no more $8 bombs — and the close
+gate was visibly refusing final-minutes markets all session.
+
+For contrast, the same morning had already produced two losing stints:
+−$17.03 on the ungated defaults and −$10.15 on eight minutes of Patient
+around an hourly rollover. One good afternoon does not cancel the
+standing caveat, and does not promise the next session anything.
+
+What can be said with a straight face: over 307 minutes of recorded
+market and 955 distinct markets, the replay now scores Patient at **PF
+1.45, +$7.49, 64% win (22 trades)** — positive and stable at every
+dataset size since the 1.8.0 mechanisms landed — while every other
+configuration measures negative, and Patient without its regime filter
+measures −$13.21. The stack earned its keep piece by measured piece.
+The live session beat its own replay, which is consistent with the
+recorded caveat that the paper fill model refuses touch-fills a real
+maker would receive.
+
+Still one Sunday. The soaks continue, and the numbers keep deciding.
