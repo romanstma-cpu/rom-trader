@@ -86,31 +86,99 @@ function grid(base: Settings): Settings[] {
   return out;
 }
 
-export function runSweep(scans: RecordedScan[], base: Settings): SweepReport {
+/** One configuration queued for scoring, baseline first. */
+export interface SweepJob {
+  settings: Settings;
+  label: string;
+}
+
+export interface SweepWork {
+  train: RecordedScan[];
+  test: RecordedScan[];
+  jobs: SweepJob[];
+  notes: string[];
+}
+
+/** How many scans a sweep is willing to chew through. */
+const MAX_SWEEP_SCANS = 6000;
+
+export function prepareSweep(scans: RecordedScan[], base: Settings): SweepWork {
   const notes: string[] = [];
+  let used = scans;
+  if (scans.length > MAX_SWEEP_SCANS) {
+    // A week-long recording would take minutes per candidate. The most recent
+    // stretch is also the most like the market the settings will face next.
+    used = scans.slice(-MAX_SWEEP_SCANS);
+    notes.push(
+      `The recording has ${scans.length.toLocaleString()} scans; the sweep used the most ` +
+        `recent ${MAX_SWEEP_SCANS.toLocaleString()}.`,
+    );
+  }
   // Split by time, never at random: shuffling would let the test set contain
   // moments adjacent to training ones and leak the answer.
-  const cut = Math.floor(scans.length * 0.6);
-  const train = scans.slice(0, cut);
-  const test = scans.slice(cut);
-
-  const score = (s: Settings, name: string): SweepCandidate => {
-    const tr = runBacktest(train, s, name);
-    const te = runBacktest(test, s, name);
-    return {
-      label: name,
-      settings: s,
-      trainPnlUsd: tr.pnlUsd,
-      trainTrades: tr.trades,
-      testPnlUsd: te.pnlUsd,
-      testTrades: te.trades,
-      testWinRate: te.winRate,
-      generalisationGapUsd: round2(te.pnlUsd - tr.pnlUsd),
-    };
+  const cut = Math.floor(used.length * 0.6);
+  return {
+    train: used.slice(0, cut),
+    test: used.slice(cut),
+    jobs: [
+      { settings: { ...base, liveMode: false }, label: "Current settings" },
+      ...grid(base).map((s) => ({ settings: s, label: label(s) })),
+    ],
+    notes,
   };
+}
 
-  const baseline = score({ ...base, liveMode: false }, "Current settings");
-  const candidates = grid(base).map((s) => score(s, label(s)));
+export function scoreCandidate(work: SweepWork, job: SweepJob): SweepCandidate {
+  const tr = runBacktest(work.train, job.settings, job.label);
+  const te = runBacktest(work.test, job.settings, job.label);
+  return {
+    label: job.label,
+    settings: job.settings,
+    trainPnlUsd: tr.pnlUsd,
+    trainTrades: tr.trades,
+    testPnlUsd: te.pnlUsd,
+    testTrades: te.trades,
+    testWinRate: te.winRate,
+    generalisationGapUsd: round2(te.pnlUsd - tr.pnlUsd),
+  };
+}
+
+export function runSweep(scans: RecordedScan[], base: Settings): SweepReport {
+  const work = prepareSweep(scans, base);
+  const [first, ...rest] = work.jobs;
+  const baseline = scoreCandidate(work, first);
+  const candidates = rest.map((j) => scoreCandidate(work, j));
+  return finishSweep(work, baseline, candidates);
+}
+
+/**
+ * The same sweep, sliced so it can run on Electron's main process without
+ * freezing the app: one candidate per event-loop turn, with progress reported
+ * as it goes. Nearly three hundred replays back to back would otherwise block
+ * every IPC call and paint for the better part of a minute.
+ */
+export async function runSweepAsync(
+  scans: RecordedScan[],
+  base: Settings,
+  onProgress?: (done: number, total: number) => void,
+): Promise<SweepReport> {
+  const work = prepareSweep(scans, base);
+  const results: SweepCandidate[] = [];
+  for (let i = 0; i < work.jobs.length; i++) {
+    results.push(scoreCandidate(work, work.jobs[i]));
+    onProgress?.(i + 1, work.jobs.length);
+    await new Promise((r) => setImmediate(r));
+  }
+  const [baseline, ...candidates] = results;
+  return finishSweep(work, baseline, candidates);
+}
+
+function finishSweep(
+  work: SweepWork,
+  baseline: SweepCandidate,
+  candidates: SweepCandidate[],
+): SweepReport {
+  const notes = [...work.notes];
 
   // Ranked by the held-out result. Ranking by training result is what makes a
   // sweep produce confident nonsense.
@@ -136,6 +204,16 @@ export function runSweep(scans: RecordedScan[], base: Settings): SweepReport {
         "fitting noise. Do not adopt it.",
     );
   }
+  if (best && best.testPnlUsd > 0 && best.testTrades < 10) {
+    // The first real sweep hit exactly this: five all-positive maker rows on
+    // three trades each. Searching 144 candidates guarantees a few land on
+    // whichever market happened to move during the test window.
+    notes.push(
+      `The winner's result rests on ${best.testTrades} trade${best.testTrades === 1 ? "" : "s"}. ` +
+        `With ${candidates.length} candidates searched, a handful of lucky trades is the expected ` +
+        `way for one to look good — treat it as noise until it repeats on more data.`,
+    );
+  }
 
   const feeAt50 = roundTripFeeCentsPerContract(50);
   notes.push(
@@ -144,8 +222,8 @@ export function runSweep(scans: RecordedScan[], base: Settings): SweepReport {
   );
 
   return {
-    scansTrain: train.length,
-    scansTest: test.length,
+    scansTrain: work.train.length,
+    scansTest: work.test.length,
     candidates: ranked,
     baseline,
     bestOutOfSample: best,

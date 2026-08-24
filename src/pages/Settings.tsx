@@ -519,6 +519,12 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
               checked={appState.notifications}
               onChange={(v) => setApp({ notifications: v })}
             />
+            <Toggle
+              label="Record market data while idle"
+              help="Save a market sweep every 30 seconds even when the engine is stopped, so the Backtest page always has real data to replay. Public prices only; nothing is traded and no keys are used."
+              checked={appState.passiveRecording}
+              onChange={(v) => setApp({ passiveRecording: v })}
+            />
           </>
         )}
         <div className="row-actions">

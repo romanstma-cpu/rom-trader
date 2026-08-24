@@ -126,3 +126,34 @@ export function clearRecording(): void {
     // nothing to do; the caller only cares that it tried
   }
 }
+
+/**
+ * Splits a recording at gaps in time.
+ *
+ * A recording pauses whenever its source does — the engine stopped, the app
+ * closed overnight — and prices keep moving while nothing is written. Replayed
+ * naively, the seam moves prices an hour in one "step", which reads as
+ * enormous momentum and manufactures entries no live engine would ever have
+ * seen. Every replay must run each contiguous stretch through its own fresh
+ * engine instead.
+ *
+ * Segments too short to warm the momentum window are dropped: five scans is
+ * the minimum from which the engine can even compute a signal.
+ */
+export function segmentScans(
+  scans: RecordedScan[],
+  maxGapMs = 180_000,
+  minScans = 5,
+): RecordedScan[][] {
+  const out: RecordedScan[][] = [];
+  let cur: RecordedScan[] = [];
+  for (const s of scans) {
+    if (cur.length > 0 && s.ts - cur[cur.length - 1].ts > maxGapMs) {
+      out.push(cur);
+      cur = [];
+    }
+    cur.push(s);
+  }
+  if (cur.length > 0) out.push(cur);
+  return out.filter((seg) => seg.length >= minScans);
+}

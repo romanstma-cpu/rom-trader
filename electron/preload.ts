@@ -53,6 +53,8 @@ const api = {
     info: () => ipcRenderer.invoke("backtest:info"),
     run: () => ipcRenderer.invoke("backtest:run"),
     clear: () => ipcRenderer.invoke("backtest:clear"),
+    sweep: () => ipcRenderer.invoke("backtest:sweep"),
+    onSweepProgress: (cb: (p: unknown) => void) => on("sweep:progress", cb),
   },
   app: {
     version: () => ipcRenderer.invoke("app:version"),

@@ -1,7 +1,7 @@
 import { TradingEngine, memoryStore } from "./engine";
 import type { KalshiMarket } from "./kalshi";
 import { computeMetrics, type PerformanceMetrics } from "./metrics";
-import type { RecordedScan } from "./recorder";
+import { segmentScans, type RecordedScan } from "./recorder";
 import { STRATEGIES } from "./strategies";
 import { DEFAULT_SETTINGS, type Settings, type TradeRecord } from "./store";
 
@@ -32,6 +32,12 @@ export interface BacktestResult {
   exitReasons: Record<string, number>;
   /** Profit factor, expectancy, per-trade Sharpe/Sortino and the rest. */
   metrics: PerformanceMetrics;
+  /** True when this configuration entered with resting maker orders. */
+  maker: boolean;
+  /** Resting orders placed / filled / expired — the numbers maker mode lives by. */
+  ordersPlaced: number;
+  ordersFilled: number;
+  ordersExpired: number;
 }
 
 /** The engine members a replay needs, which are private for live use. */
@@ -51,39 +57,63 @@ export function runBacktest(
   settings: Settings,
   label: string,
 ): BacktestResult {
+  // One shared ledger across every segment, the way history.json persists
+  // across engine restarts in the app — so the daily-loss brake still sees
+  // the whole day. Each segment gets a fresh engine, the way a restart
+  // clears positions, cash and price history.
   const store = memoryStore();
-  // liveMode is forced off: a replay must never be able to place an order,
-  // whatever the settings being tested happen to say.
-  const engine = new TradingEngine(
-    { ...settings, liveMode: false },
-    { apiKeyId: "", apiPrivateKeyPem: "" },
-    store,
-  );
-  const drivable = engine as unknown as Drivable;
-  drivable.status = "running";
-
   const equity: { ts: number; equityUsd: number }[] = [];
+  let haltedReason: string | null = null;
+  let ordersPlaced = 0;
+  let ordersFilled = 0;
+  let ordersExpired = 0;
 
-  for (const scan of scans) {
-    if (drivable.status !== "running") break; // a brake stopped it
-    // Mirrors the order in tick(); a step left out here passes in replays and
-    // then behaves differently in the running app.
-    drivable.processPendingOrders(scan.markets);
-    drivable.updatePositions(scan.markets);
-    drivable.scanForEntries(scan.markets, scan.ts);
-    drivable.enforceDailyLossLimit();
-    drivable.enforceLosingStreak();
-    drivable.enforceMaxDrawdown();
-    equity.push({ ts: scan.ts, equityUsd: round2(drivable.equity()) });
+  for (const seg of segmentScans(scans)) {
+    // liveMode is forced off: a replay must never be able to place an order,
+    // whatever the settings being tested happen to say.
+    const engine = new TradingEngine(
+      { ...settings, liveMode: false },
+      { apiKeyId: "", apiPrivateKeyPem: "" },
+      store,
+    );
+    const drivable = engine as unknown as Drivable;
+    drivable.status = "running";
+
+    for (const scan of seg) {
+      if (drivable.status !== "running") break; // a brake stopped it
+      // Mirrors the order in tick(); a step left out here passes in replays
+      // and then behaves differently in the running app.
+      drivable.processPendingOrders(scan.markets);
+      drivable.updatePositions(scan.markets);
+      drivable.scanForEntries(scan.markets, scan.ts);
+      drivable.enforceDailyLossLimit();
+      drivable.enforceLosingStreak();
+      drivable.enforceMaxDrawdown();
+      equity.push({ ts: scan.ts, equityUsd: round2(drivable.equity()) });
+    }
+
+    // Close whatever is still open, so two runs are compared on realised
+    // results rather than on how kindly the recording happened to end.
+    engine.flatten("recording ended");
+
+    const logs = engine.getLogs();
+    ordersPlaced += logs.filter((l) => l.msg.startsWith("REST ")).length;
+    ordersFilled += logs.filter((l) => l.msg.startsWith("FILL ")).length;
+    ordersExpired += logs.filter((l) => l.msg.startsWith("EXPIRE ")).length;
+
+    haltedReason = engine.getState().haltedReason;
+    // A brake that fired would, live, leave the engine stopped until someone
+    // came back to it — later segments do not get to pretend otherwise.
+    if (haltedReason !== null) break;
   }
 
-  // Close whatever is still open, so two runs are compared on realised
-  // results rather than on how kindly the recording happened to end.
-  engine.flatten();
-
-  const state = engine.getState();
-  const history = store.loadHistory();
-  return summarise(label, history, equity, state.haltedReason);
+  return {
+    ...summarise(label, store.loadHistory(), equity, haltedReason),
+    maker: settings.makerEntries,
+    ordersPlaced,
+    ordersFilled,
+    ordersExpired,
+  };
 }
 
 function summarise(
@@ -91,7 +121,7 @@ function summarise(
   history: TradeRecord[],
   equity: { ts: number; equityUsd: number }[],
   haltedReason: string | null,
-): BacktestResult {
+): Omit<BacktestResult, "maker" | "ordersPlaced" | "ordersFilled" | "ordersExpired"> {
   const wins = history.filter((t) => t.pnlUsd > 0).length;
   const losses = history.filter((t) => t.pnlUsd < 0).length;
   const pnl = history.reduce((s, t) => s + t.pnlUsd, 0);

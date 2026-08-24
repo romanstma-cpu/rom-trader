@@ -18,8 +18,10 @@ import * as path from "node:path";
 import { TradingEngine, memoryStore } from "../electron/engine/engine";
 import type { KalshiMarket } from "../electron/engine/kalshi";
 import { computeMetrics, type PerformanceMetrics } from "../electron/engine/metrics";
+import { segmentScans } from "../electron/engine/recorder";
 import { STRATEGIES } from "../electron/engine/strategies";
 import { DEFAULT_SETTINGS, type Settings, type TradeRecord } from "../electron/engine/store";
+import { runSweep } from "../electron/engine/sweep";
 
 interface Scan {
   ts: number;
@@ -44,29 +46,6 @@ function loadScans(file: string): Scan[] {
     }
   }
   return out;
-}
-
-/**
- * Splits a recording at gaps in time.
- *
- * A recorder that stops and restarts leaves a seam where prices move an hour
- * in one "step". Replayed naively, that seam reads as enormous momentum and
- * manufactures entries no live engine would ever have seen. Each contiguous
- * stretch is replayed through its own fresh engine instead.
- */
-function segments(scans: Scan[], maxGapMs = 180_000): Scan[][] {
-  const out: Scan[][] = [];
-  let cur: Scan[] = [];
-  for (const s of scans) {
-    if (cur.length > 0 && s.ts - cur[cur.length - 1].ts > maxGapMs) {
-      out.push(cur);
-      cur = [];
-    }
-    cur.push(s);
-  }
-  if (cur.length > 0) out.push(cur);
-  // A stub too short to warm the momentum window measures nothing.
-  return out.filter((seg) => seg.length >= 10);
 }
 
 interface SegmentResult {
@@ -121,7 +100,7 @@ function replaySegment(scans: Scan[], settings: Settings): SegmentResult {
     d.enforceMaxDrawdown();
     equity.push({ ts: scan.ts, equityUsd: d.equity() });
   }
-  engine.flatten();
+  engine.flatten("open at segment end");
 
   const logs = engine.getLogs();
   return {
@@ -198,7 +177,9 @@ function main(): void {
     process.exit(1);
   }
 
-  const segs = segments(scans);
+  // A ten-scan minimum here rather than the app's five: this script prints
+  // research tables, and a stub segment adds noise faster than information.
+  const segs = segmentScans(scans, 180_000, 10);
   if (segs.length === 0) {
     console.log("No contiguous segment is long enough to replay.");
     process.exit(1);
@@ -276,15 +257,36 @@ function main(): void {
     if (r.metrics.trades === 0) continue;
     const parts = Object.entries(r.exitReasons)
       .sort((a, b) => b[1] - a[1])
-      // The engine writes "flattened by user"; in a replay that close comes
-      // from a segment running out with the position still open.
-      .map(([k, n]) => `${n} ${k === "flattened by user" ? "open at segment end" : k}`)
+      .map(([k, n]) => `${n} ${k}`)
       .join(" · ");
     console.log(`  ${r.label.padEnd(26)} ${parts}`);
   }
 
   const anyHalted = rows.filter((r) => r.halted !== null);
   for (const r of anyHalted) console.log(`\n  NOTE ${r.label} halted: ${r.halted}`);
+
+  // The disciplined verdict: the full grid, fitted on the first 60% of the
+  // recording and scored on the 40% it never saw. The hand-picked rows above
+  // answer specific questions; this answers "is there anything here at all".
+  const sweep = runSweep(scans, base);
+  console.log(
+    `\n  Train/test sweep — fitted on ${sweep.scansTrain} scans, scored on ${sweep.scansTest} unseen:`,
+  );
+  console.log(
+    `  ${"candidate".padEnd(34)} ${"fitted".padStart(9)} ${"unseen".padStart(9)} ${"trades".padStart(7)}`,
+  );
+  console.log(`  ${"-".repeat(34)} ${"-".repeat(9)} ${"-".repeat(9)} ${"-".repeat(7)}`);
+  const sweepRows = [
+    ...(sweep.baseline ? [sweep.baseline] : []),
+    ...sweep.candidates.slice(0, 5),
+  ];
+  for (const c of sweepRows) {
+    const f = `${c.trainPnlUsd >= 0 ? "+" : ""}$${c.trainPnlUsd.toFixed(2)}`;
+    const u = `${c.testPnlUsd >= 0 ? "+" : ""}$${c.testPnlUsd.toFixed(2)}`;
+    const name = c === sweep.baseline ? `${c.label} (yours)` : c.label;
+    console.log(`  ${name.padEnd(34)} ${f.padStart(9)} ${u.padStart(9)} ${String(c.testTrades).padStart(7)}`);
+  }
+  for (const n of sweep.notes) console.log(`  · ${n}`);
 
   console.log(
     "\n  One recording is one stretch of one night. It says how these settings" +

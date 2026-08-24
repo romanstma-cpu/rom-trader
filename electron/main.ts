@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { installCrashHandlers, reportFatal } from "./crashlog";
 import { checkForUpdates, getUpdateState, initUpdater, installUpdate } from "./updater";
 import { compareStrategies } from "./engine/backtest";
+import { runSweepAsync } from "./engine/sweep";
 import { type EngineEvent, TradingEngine } from "./engine/engine";
 import { clearRecording, loadRecording, recordScan, recordingInfo } from "./engine/recorder";
 import {
@@ -206,6 +207,38 @@ function createWindow(): void {
   });
 }
 
+/**
+ * Records market sweeps while the engine is parked.
+ *
+ * Recording used to live inside the trading loop, so the Backtest page had
+ * data exactly when the bot was busy and none when it was not — and a brake
+ * halt stopped data collection along with the trading, which is backwards:
+ * the stretch after a halt is precisely the one worth studying later.
+ *
+ * Public endpoint, no credentials, one request every thirty seconds. While
+ * the engine runs it records its own sweeps and this loop stands down, so
+ * nothing is written twice.
+ */
+function startPassiveRecorder(): void {
+  const publicClient = new KalshiClient();
+  let sweeping = false;
+  setInterval(() => {
+    if (sweeping) return;
+    if (engine.getState().status === "running") return;
+    if (!loadAppState().passiveRecording) return;
+    sweeping = true;
+    publicClient
+      .getActiveMarkets(40)
+      .then((markets) => recordScan(markets))
+      .catch(() => {
+        // Offline or rate-limited: skip this sweep, try again next interval.
+      })
+      .finally(() => {
+        sweeping = false;
+      });
+  }, 30_000);
+}
+
 function registerIpc(): void {
   ipcMain.handle("engine:start", () => engine.start());
   ipcMain.handle("engine:stop", () => engine.stop());
@@ -316,6 +349,28 @@ function registerIpc(): void {
     return recordingInfo();
   });
 
+  let sweepRunning = false;
+  ipcMain.handle("backtest:sweep", async () => {
+    if (sweepRunning) throw new Error("A sweep is already running.");
+    const scans = loadRecording();
+    if (scans.length < 60) {
+      throw new Error(
+        `Only ${scans.length} recorded scans. A parameter search over less than a quarter ` +
+          `of an hour of data would just rank noise.`,
+      );
+    }
+    sweepRunning = true;
+    try {
+      // Sliced across event-loop turns inside runSweepAsync, so the app stays
+      // responsive while nearly three hundred replays grind through.
+      return await runSweepAsync(scans, loadSettings(), (done, total) =>
+        sendToRenderer("sweep:progress", { done, total }),
+      );
+    } finally {
+      sweepRunning = false;
+    }
+  });
+
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:dataDir", () => dataDir());
   ipcMain.handle("app:openDataFolder", () => shell.openPath(dataDir()));
@@ -379,6 +434,7 @@ if (!app.requestSingleInstanceLock()) {
       // Every live sweep is kept so strategies can be compared on real data
       // later instead of on argument.
       engine.setRecorder(recordScan);
+      startPassiveRecorder();
       engine.subscribe({
         onState: (s) => {
           sendToRenderer("engine:state", s);

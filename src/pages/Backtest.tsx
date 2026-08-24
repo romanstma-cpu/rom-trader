@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BacktestResult, RecordingInfo } from "../types";
+import type { BacktestResult, RecordingInfo, SweepProgress, SweepReport } from "../types";
 import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
 
 function bytes(n: number): string {
@@ -27,13 +27,33 @@ export default function Backtest() {
   const [results, setResults] = useState<BacktestResult[] | null>(null);
   const [running, setRunning] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [sweep, setSweep] = useState<SweepReport | null>(null);
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepProgress, setSweepProgress] = useState<SweepProgress | null>(null);
   const toast = useToast();
 
   useEffect(() => {
     void window.rom.backtest.info().then(setInfo);
     const t = setInterval(() => void window.rom.backtest.info().then(setInfo), 15000);
-    return () => clearInterval(t);
+    const off = window.rom.backtest.onSweepProgress(setSweepProgress);
+    return () => {
+      clearInterval(t);
+      off();
+    };
   }, []);
+
+  async function runSweep() {
+    setSweeping(true);
+    setSweep(null);
+    setSweepProgress(null);
+    try {
+      setSweep(await window.rom.backtest.sweep());
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    } finally {
+      setSweeping(false);
+    }
+  }
 
   async function run() {
     setRunning(true);
@@ -110,8 +130,88 @@ export default function Backtest() {
           <button className="btn primary" onClick={() => void run()} disabled={!enough || running}>
             {running ? "Replaying…" : "Compare strategies"}
           </button>
+          <button
+            className="btn quiet"
+            onClick={() => void runSweep()}
+            disabled={info.scans < 60 || sweeping || running}
+            title="Tries a coarse grid of settings, fitted on the first 60% of the recording and scored on the last 40% it never saw."
+          >
+            {sweeping
+              ? sweepProgress
+                ? `Sweeping… ${sweepProgress.done}/${sweepProgress.total}`
+                : "Sweeping…"
+              : "Parameter sweep"}
+          </button>
         </div>
+        {sweeping && sweepProgress && (
+          <div className="progress" role="progressbar" aria-valuenow={sweepProgress.done} aria-valuemin={0} aria-valuemax={sweepProgress.total}>
+            <div
+              className="progress-fill"
+              style={{ width: `${(sweepProgress.done / sweepProgress.total) * 100}%` }}
+            />
+          </div>
+        )}
       </div>
+
+      {sweep && (
+        <div className="card">
+          <div className="card-head">
+            <div className="label">Parameter sweep</div>
+            <span className="hint">
+              fitted on {sweep.scansTrain.toLocaleString()} scans · scored on{" "}
+              {sweep.scansTest.toLocaleString()} it never saw
+            </span>
+          </div>
+
+          {/* The verdict leads. A ranking table without it invites adopting
+              whichever row is on top, which is the failure mode this page
+              exists to prevent. */}
+          <div className={`notice ${sweep.nothingWorked ? "warn" : ""}`} role="status">
+            {sweep.nothingWorked
+              ? "No candidate made money on the held-out data. That is the honest result: on this recording, nothing in the grid had an edge, and the ranking below only orders degrees of losing."
+              : "The top rows made money on data they never saw. That is one recording's worth of evidence — not an edge — but it earns a longer look."}
+          </div>
+
+          <table className="tight">
+            <thead>
+              <tr>
+                <th>Configuration</th>
+                <th title="Result on the 60% the search was allowed to fit.">Fitted</th>
+                <th title="Result on the held-out 40%. The only column that matters.">Unseen</th>
+                <th>Trades</th>
+                <th>Win rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                ...(sweep.baseline ? [sweep.baseline] : []),
+                ...sweep.candidates.slice(0, 10),
+              ].map((c, i) => (
+                <tr key={`${c.label}-${i}`}>
+                  <td>
+                    <strong>{c.label}</strong>
+                    {sweep.baseline && c === sweep.baseline && (
+                      <span className="hint"> · yours</span>
+                    )}
+                  </td>
+                  <td className={pnlClass(c.trainPnlUsd)}>{signedMoney(c.trainPnlUsd)}</td>
+                  <td className={pnlClass(c.testPnlUsd)}>{signedMoney(c.testPnlUsd)}</td>
+                  <td>{c.testTrades}</td>
+                  <td>{c.testWinRate === null ? "—" : `${(c.testWinRate * 100).toFixed(0)}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {sweep.notes.length > 0 && (
+            <div className="callout">
+              {sweep.notes.map((n, i) => (
+                <div key={i}>{n}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {results && (
         <div className="card">
@@ -133,6 +233,9 @@ export default function Backtest() {
                 <th title="Gross winnings over gross losses. Above 1 is profitable.">PF</th>
                 <th title="Mean over standard deviation of per-trade P&L. Per trade, not annualised.">
                   Sharpe
+                </th>
+                <th title="Resting maker orders: filled / placed. A maker config with few fills traded on luck, not intent.">
+                  Orders
                 </th>
                 <th>Worst drawdown</th>
                 <th>Best / worst trade</th>
@@ -168,6 +271,7 @@ export default function Backtest() {
                   <td>
                     {r.metrics.sharpePerTrade === null ? "—" : r.metrics.sharpePerTrade.toFixed(2)}
                   </td>
+                  <td>{r.maker ? `${r.ordersFilled}/${r.ordersPlaced}` : "—"}</td>
                   <td>{r.maxDrawdownUsd > 0 ? `−${money(r.maxDrawdownUsd)}` : "—"}</td>
                   <td>
                     <span className="pos">{signedMoney(r.bestUsd)}</span>{" "}

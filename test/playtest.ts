@@ -41,8 +41,10 @@ import {
   loadRecording,
   recordScan,
   recordingInfo,
+  segmentScans,
 } from "../electron/engine/recorder";
 import { compareStrategies, runBacktest } from "../electron/engine/backtest";
+import { runSweep } from "../electron/engine/sweep";
 import {
   breakEvenWinRate,
   netEdgeCents,
@@ -112,6 +114,9 @@ reset();
 check("disclaimer starts unaccepted", loadAppState().disclaimerAccepted === false);
 saveAppState({ ...loadAppState(), disclaimerAccepted: true });
 check("disclaimer persists once accepted", loadAppState().disclaimerAccepted === true);
+check("passive recording defaults on", loadAppState().passiveRecording === true);
+saveAppState({ ...loadAppState(), passiveRecording: false });
+check("passive recording can be turned off", loadAppState().passiveRecording === false);
 
 // ---------------------------------------------------------------- strategies
 
@@ -795,6 +800,12 @@ reset();
   const takerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS }, "taker");
   check("a runaway market fills the taker, not the maker", takerRun.trades > 0 && makerRun.trades === 0);
   check("the unfilled maker run ends flat, not negative", makerRun.pnlUsd === 0);
+  check(
+    "the backtest counts the orders that never filled",
+    makerRun.ordersPlaced > 0 && makerRun.ordersFilled === 0,
+    `${makerRun.ordersFilled}/${makerRun.ordersPlaced}`,
+  );
+  check("a taker run reports no maker orders", takerRun.maker === false && takerRun.ordersPlaced === 0);
 }
 
 section("regime filter");
@@ -1017,6 +1028,51 @@ check("a torn final line is skipped, not fatal", loadRecording().length === 2);
 clearRecording();
 check("clearing removes the recording", recordingInfo().exists === false);
 
+section("recording seams");
+reset();
+{
+  const t0 = 1_700_000_000_000;
+  const scan = (ts: number, bid: number, ask: number, vol: number) => ({
+    ts,
+    markets: [{ ...mkt("KXSEAM", bid, ask), volume: vol }],
+  });
+
+  // segmentScans itself.
+  const contiguous = [0, 1, 2, 3, 4, 5].map((i) => scan(t0 + i * 15000, 40, 41, 100 + i));
+  check("a contiguous recording is one segment", segmentScans(contiguous as never).length === 1);
+
+  const gapped = [
+    ...[0, 1, 2, 3, 4].map((i) => scan(t0 + i * 15000, 40, 41, 100 + i * 20)),
+    ...[0, 1, 2, 3, 4].map((i) => scan(t0 + 3_600_000 + i * 15000, 45, 46, 300 + i * 20)),
+  ];
+  check("a gap splits the recording in two", segmentScans(gapped as never).length === 2);
+  check(
+    "a stub segment is dropped",
+    segmentScans([...contiguous, scan(t0 + 7_200_000, 50, 51, 500)] as never).length === 1,
+  );
+  check("an empty recording yields no segments", segmentScans([]).length === 0);
+
+  // The defence the splitting exists for: prices jump 5c across an hour-long
+  // seam. Unsegmented, that seam reads as one 15-second momentum burst and
+  // the replay buys it; segmented, each side is quiet and nothing trades.
+  const seamResult = runBacktest(gapped as never, { ...DEFAULT_SETTINGS }, "seam");
+  check("a seam jump is not traded as momentum", seamResult.trades === 0, `${seamResult.trades} trades`);
+
+  // The same 5c move without the gap is genuine momentum and must still trade
+  // — the splitting must not neuter the replay.
+  const genuine = [
+    ...[0, 1, 2, 3, 4].map((i) => scan(t0 + i * 15000, 40, 41, 100 + i * 20)),
+    ...[5, 6, 7, 8, 9].map((i) => scan(t0 + i * 15000, 45, 46, 100 + i * 20)),
+  ];
+  const genuineResult = runBacktest(genuine as never, { ...DEFAULT_SETTINGS }, "genuine");
+  check("the same move without a gap still trades", genuineResult.trades > 0);
+  check(
+    "an end-of-recording close says so",
+    (genuineResult.exitReasons["recording ended"] ?? 0) > 0,
+    JSON.stringify(genuineResult.exitReasons),
+  );
+}
+
 section("backtest");
 reset();
 clearRecording();
@@ -1068,6 +1124,71 @@ clearRecording();
   check("your settings come first", all[0].label === "Your settings");
   check("every preset is named", STRATEGIES.every((s) => all.some((r) => r.label === s.name)));
   check("drawdown is never negative", all.every((r) => r.maxDrawdownUsd >= 0));
+}
+
+section("parameter sweep");
+reset();
+{
+  // Fifty scans of a wavy market with growing volume: enough movement that
+  // some candidates trade on both sides of the split, nothing hand-tuned.
+  const t0 = 1_700_000_000_000;
+  const scans: { ts: number; markets: Mkt[] }[] = [];
+  for (let i = 0; i < 50; i++) {
+    const p = 45 + Math.round(6 * Math.sin(i / 3)) + (i % 9 === 4 ? 4 : 0);
+    scans.push({
+      ts: t0 + i * 15000,
+      markets: [{ ...mkt("KXSW", p, p + 1), volume: 100 + i * 15 }],
+    });
+  }
+
+  const report = runSweep(scans as never, { ...DEFAULT_SETTINGS });
+  check(
+    "the split is 60/40 by time",
+    report.scansTrain === 30 && report.scansTest === 20,
+    `${report.scansTrain}/${report.scansTest}`,
+  );
+  check("the baseline is the user's settings", report.baseline?.label === "Current settings");
+  check(
+    "candidates are ranked by the held-out result",
+    report.candidates.every(
+      (c, i) => i === 0 || report.candidates[i - 1].testPnlUsd >= c.testPnlUsd,
+    ),
+  );
+  check("the maker axis is searched", report.candidates.some((c) => c.label.includes("maker")));
+  check("the best is the top of the ranking", report.bestOutOfSample === report.candidates[0]);
+  check(
+    "nothingWorked agrees with the best row",
+    report.nothingWorked === ((report.bestOutOfSample?.testPnlUsd ?? 0) <= 0),
+  );
+  check("the fee floor is always in the notes", report.notes.some((n) => n.includes("Round-trip fee")));
+  check(
+    "every candidate has live mode forced off",
+    report.candidates.every((c) => c.settings.liveMode === false),
+  );
+
+  // A flat training half and one clean run-up in the test half: whichever
+  // candidate catches it "wins" on a couple of trades. The sweep must call
+  // that luck out loud rather than crown it.
+  const lucky: { ts: number; markets: Mkt[] }[] = [];
+  for (let i = 0; i < 50; i++) {
+    const p = i < 30 ? 45 : Math.min(78, 45 + (i - 29) * 2);
+    lucky.push({
+      ts: t0 + i * 15000,
+      markets: [{ ...mkt("KXLK", p, p + 1), volume: 100 + i * 15 }],
+    });
+  }
+  const luckyReport = runSweep(lucky as never, { ...DEFAULT_SETTINGS });
+  check(
+    "a tiny-sample winner exists to test against",
+    (luckyReport.bestOutOfSample?.testPnlUsd ?? 0) > 0 &&
+      (luckyReport.bestOutOfSample?.testTrades ?? 99) < 10,
+    `${luckyReport.bestOutOfSample?.testTrades} trades, $${luckyReport.bestOutOfSample?.testPnlUsd}`,
+  );
+  check(
+    "the sweep calls a lucky winner noise",
+    luckyReport.notes.some((n) => n.includes("treat it as noise")),
+    luckyReport.notes.join(" | "),
+  );
 }
 
 // ---------------------------------------------------------------- shutdown

@@ -368,13 +368,17 @@ export class TradingEngine {
     this.emitState();
   }
 
-  /** Closes every open position at the current bid but leaves the engine running. */
-  flatten(): number {
+  /**
+   * Closes every open position at the current bid but leaves the engine
+   * running. The reason lands in trade history, so a replay closing out at
+   * the end of a recording can say that instead of blaming a user.
+   */
+  flatten(reason = "flattened by user"): number {
     const orders = this.pendingOrders.length;
-    for (const o of [...this.pendingOrders]) this.cancelPending(o, "flattened by user");
+    for (const o of [...this.pendingOrders]) this.cancelPending(o, reason);
     const n = this.positions.length;
     if (n === 0 && orders === 0) return 0;
-    for (const p of [...this.positions]) this.closePosition(p, "flattened by user");
+    for (const p of [...this.positions]) this.closePosition(p, reason);
     this.log(
       "warn",
       `Flattened ${n} position${n === 1 ? "" : "s"}` +

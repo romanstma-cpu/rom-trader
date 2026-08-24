@@ -273,3 +273,64 @@ cheap.
 One recording, one quiet Sunday night, a dozen trades per row. These numbers
 choose directions, not truths. Every conclusion here is re-checkable in one
 command against every future recording: `node scripts/replay.js`.
+
+---
+
+# 1.7.0: the plumbing catches up with the method
+
+Three defects in the machinery around the strategy, found while using it.
+
+## The app's own backtests had the seam bug
+
+`scripts/replay.ts` learned in 1.6.0 to split recordings at gaps; the
+Backtest page inside the app did not. Any recording with an engine stop and
+restart replayed the seam as one 15-second price step — an hour of drift
+read as momentum, traded by every configuration in the comparison. The
+splitting now lives in the recorder (`segmentScans`) and both the app and
+the script use it: a fresh engine per contiguous segment, one shared trade
+ledger the way history.json persists across real restarts. There is a test
+that hands the replayer a 5c jump across an hour-long gap and requires zero
+trades, and the same jump without the gap and requires at least one.
+
+## Recording died exactly when it mattered
+
+Recording lived inside the trading loop, so the Backtest page had data only
+while the bot traded — and a brake halt stopped data collection along with
+the trading, which is backwards: the stretch after a halt is the one worth
+studying. The app now records a sweep every 30 seconds while the engine is
+parked (public endpoint, no keys, a toggle in Settings, on by default).
+
+## The sweep learned to distrust its own winner
+
+The parameter sweep is now on the Backtest page — 145 candidates, fitted on
+the first 60% of the recording, scored on the 40% they never saw, sliced
+across event-loop turns so the app stays responsive (measured at ~7ms per
+candidate; the fear it would take minutes was wrong by two orders of
+magnitude, which is why it was measured).
+
+Its first run on real data produced the most seductive table this project
+has generated: five maker configurations, all positive out of sample,
++$11.29 at the top. On **three trades each.** After searching 144
+candidates. A grid that size lands a few candidates on whichever market
+happened to move during a one-hour test window; that is not an edge, it is
+a raffle. The sweep now says this itself — any winner whose out-of-sample
+result rests on fewer than ten trades is labelled noise in its own output,
+and there is a test that builds exactly that trap and requires the warning.
+
+## Where the measurements stand after 63 minutes of real data
+
+The full recording (254 scans, 240 markets, two segments):
+
+| config | trades | win | PF | per trade |
+|---|---|---|---|---|
+| shipped defaults (both gates) | 15 | 33% | **0.71** | **−$0.70** |
+| bid gate only | 22 | 36% | 0.68 | −$0.87 |
+| pre-1.6 ungated | 18 | 39% | 0.55 | −$1.06 |
+| volume gate only | 13 | 31% | 0.41 | −$1.63 |
+| maker, same rules | 10 | 20% | 0.42 | −$1.82 |
+
+The 1.6.0 gate decision held up on more data, with sharper attribution: the
+bid gate carries most of the improvement, the volume gate adds a little on
+top of it, and neither alone beats both. Maker entries stayed worse than
+taker on identical rules — the adverse-selection finding repeats. Still
+negative everywhere, still one night, still no edge claimed.

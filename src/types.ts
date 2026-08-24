@@ -139,6 +139,7 @@ export interface AppSettings {
   startWithWindows: boolean;
   notifications: boolean;
   closeToTray: boolean;
+  passiveRecording: boolean;
 }
 
 export interface TradeRecord {
@@ -234,6 +235,38 @@ export interface BacktestResult {
   equity: { ts: number; equityUsd: number }[];
   exitReasons: Record<string, number>;
   metrics: PerformanceMetrics;
+  maker: boolean;
+  ordersPlaced: number;
+  ordersFilled: number;
+  ordersExpired: number;
+}
+
+export interface SweepCandidate {
+  label: string;
+  settings: Settings;
+  trainPnlUsd: number;
+  trainTrades: number;
+  testPnlUsd: number;
+  testTrades: number;
+  testWinRate: number | null;
+  /** Positive when it did better on unseen data than on training data. */
+  generalisationGapUsd: number;
+}
+
+export interface SweepReport {
+  scansTrain: number;
+  scansTest: number;
+  candidates: SweepCandidate[];
+  baseline: SweepCandidate | null;
+  bestOutOfSample: SweepCandidate | null;
+  /** True when even the best candidate lost money on unseen data. */
+  nothingWorked: boolean;
+  notes: string[];
+}
+
+export interface SweepProgress {
+  done: number;
+  total: number;
 }
 
 export interface InstallRefusal {
@@ -286,6 +319,8 @@ export interface RomApi {
     info: () => Promise<RecordingInfo>;
     run: () => Promise<BacktestResult[]>;
     clear: () => Promise<RecordingInfo>;
+    sweep: () => Promise<SweepReport>;
+    onSweepProgress: (cb: (p: SweepProgress) => void) => () => void;
   };
   app: {
     version: () => Promise<string>;

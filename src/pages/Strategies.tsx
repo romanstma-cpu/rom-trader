@@ -110,6 +110,10 @@ export default function Strategies() {
                 <span className="k">Scan</span>
                 <span className="v">{s.params.tickSeconds}s</span>
               </div>
+              <div>
+                <span className="k">Entry</span>
+                <span className="v">{s.params.makerEntries ? "rests at bid" : "crosses to ask"}</span>
+              </div>
             </div>
 
             <button

@@ -83,6 +83,14 @@ export interface AppState {
   notifications: boolean;
   /** Closing the window leaves the engine running in the tray. */
   closeToTray: boolean;
+  /**
+   * Keep recording market sweeps while the engine is stopped.
+   *
+   * Recording used to happen only inside the trading loop, which meant the
+   * Backtest page had data exactly when the bot was busy and none when it was
+   * parked — and a brake halt stopped data collection along with the trading.
+   */
+  passiveRecording: boolean;
 }
 
 export interface Profile {
@@ -153,6 +161,7 @@ export const DEFAULT_APP_STATE: AppState = {
   startWithWindows: false,
   notifications: true,
   closeToTray: false,
+  passiveRecording: true,
 };
 
 const MAX_EQUITY_POINTS = 720;

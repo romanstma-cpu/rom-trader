@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import type { TradeRecord } from "../types";
 import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
+// Shared with the engine rather than reimplemented, so the numbers here are
+// the same ones the backtester reports for the same trades.
+import { computeMetrics } from "../../electron/engine/metrics";
 
 type Filter = "all" | "wins" | "losses";
 
@@ -24,6 +27,10 @@ export default function History({ onChanged }: { onChanged: () => void }) {
       rows.length > 0 ? rows.reduce((s, r) => s + (r.closedAt - r.openedAt), 0) / rows.length : 0;
     return { total, wins: wins.length, losses: losses.length, best, worst, avgHoldMs };
   }, [rows]);
+
+  // No equity curve here: drawdown belongs to a session, and this page pools
+  // trades across many. The per-trade numbers are what carry over.
+  const metrics = useMemo(() => computeMetrics(rows, []), [rows]);
 
   const shown = useMemo(() => {
     const f =
@@ -94,6 +101,40 @@ export default function History({ onChanged }: { onChanged: () => void }) {
           <div className="label">Avg Hold</div>
           <div className="value">{Math.round(stats.avgHoldMs / 1000)}s</div>
           <div className="hint">open to close</div>
+        </div>
+        <div className="card stat">
+          <div className="label">Profit factor</div>
+          <div
+            className={`value ${
+              metrics.profitFactor === null ? "" : metrics.profitFactor >= 1 ? "pos" : "neg"
+            }`}
+          >
+            {metrics.profitFactor === null ? "—" : metrics.profitFactor.toFixed(2)}
+          </div>
+          <div className="hint">winnings ÷ losses · above 1 is profitable</div>
+        </div>
+        <div className="card stat">
+          <div className="label">Per trade</div>
+          <div className={`value ${metrics.expectancyUsd === null ? "" : pnlClass(metrics.expectancyUsd)}`}>
+            {metrics.expectancyUsd === null ? "—" : signedMoney(metrics.expectancyUsd)}
+          </div>
+          <div className="hint">average result of one trade</div>
+        </div>
+        <div className="card stat">
+          <div className="label">Payoff</div>
+          <div className="value">
+            {metrics.payoffRatio === null ? "—" : `${metrics.payoffRatio.toFixed(2)}×`}
+          </div>
+          <div className="hint">average win vs average loss</div>
+        </div>
+        <div className="card stat">
+          <div className="label">Streaks</div>
+          <div className="value">
+            <span className="pos">{metrics.longestWinStreak}W</span>
+            <span className="muted"> / </span>
+            <span className="neg">{metrics.longestLossStreak}L</span>
+          </div>
+          <div className="hint">longest runs</div>
         </div>
       </div>
 
