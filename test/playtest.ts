@@ -1074,6 +1074,81 @@ reset();
   check("the gate off keeps the old behaviour", e.getState().positions.length === 1);
 }
 
+section("risk-balanced sizing");
+reset();
+{
+  // The first live soak's worst trade: $10 at 15c bought 66 contracts, so a
+  // 12c stop cost $7.92 instead of the $2.40 it costs at 50c. The risk cap
+  // must equalise the stop-out cost across the price range.
+  const cheapFlat = [mkt("KXCHEAP", 14, 15)];
+  const cheapJump = [mkt("KXCHEAP", 19, 20)];
+  let e = runEngine({}, [cheapFlat, cheapFlat, cheapFlat, cheapFlat, cheapJump]);
+  let p = e.getState().positions[0];
+  check("a cheap strike opens", p !== undefined);
+  check("— but cannot out-risk a mid-price trade", p.contracts === 20, `${p?.contracts} contracts`);
+  check(
+    "a stop-out is bounded to a quarter of the trade size",
+    (p.contracts * DEFAULT_SETTINGS.stopLossCents) / 100 <= DEFAULT_SETTINGS.tradeSizeUsd * 0.25 + 0.01,
+    `$${((p.contracts * DEFAULT_SETTINGS.stopLossCents) / 100).toFixed(2)} at risk`,
+  );
+
+  // Mid-price sizing must be exactly what it always was — the cap only
+  // trims the tails.
+  const midFlat = [mkt("KXMID", 50, 51)];
+  const midJump = [mkt("KXMID", 55, 56)];
+  e = runEngine({}, [midFlat, midFlat, midFlat, midFlat, midJump]);
+  p = e.getState().positions[0];
+  check("mid-price sizing is unchanged", p?.contracts === 17, `${p?.contracts} contracts`);
+
+  // A wide stop also risks more per contract, so it sizes down too.
+  e = runEngine({ stopLossCents: 25, takeProfitCents: 26 }, [midFlat, midFlat, midFlat, midFlat, midJump]);
+  p = e.getState().positions[0];
+  check(
+    "a wide stop trades smaller for the same risk",
+    p !== undefined && p.contracts === 10,
+    `${p?.contracts} contracts`,
+  );
+}
+
+section("the endgame entry cutoff");
+reset();
+{
+  const now = Math.floor(Date.now() / 1000);
+  const at = (ticker: string, bid: number, ask: number, closeInS: number) => ({
+    ...mkt(ticker, bid, ask),
+    close_ts: now + closeInS,
+  });
+
+  // Ten minutes to close, default 30-minute cutoff: no entry, and the
+  // signal says why.
+  const soonFlat = [at("KXSOON", 40, 41, 600)];
+  const soonJump = [at("KXSOON", 45, 46, 600)];
+  let e = runEngine({}, [soonFlat, soonFlat, soonFlat, soonFlat, soonJump]);
+  check("a market near its close is refused", e.getState().positions.length === 0);
+  check("the scanner counts the closing skip", (e.getState().scanner?.skippedClosing ?? 0) > 0);
+  check(
+    "the signal names the cutoff",
+    e.getSignals().some((s) => s.reason.includes("entry cutoff")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // Ninety minutes out clears the default cutoff.
+  const farFlat = [at("KXFAR", 40, 41, 5400)];
+  const farJump = [at("KXFAR", 45, 46, 5400)];
+  e = runEngine({}, [farFlat, farFlat, farFlat, farFlat, farJump]);
+  check("a market with time left still trades", e.getState().positions.length === 1);
+
+  // Old recordings carry no close time; unknown must pass, not guess.
+  const bare = [mkt("KXOLD", 40, 41)];
+  const bareUp = [mkt("KXOLD", 45, 46)];
+  e = runEngine({}, [bare, bare, bare, bare, bareUp]);
+  check("an unknown close time is let through", e.getState().positions.length === 1);
+
+  // 0 disables the gate entirely.
+  e = runEngine({ minMinutesToClose: 0 }, [soonFlat, soonFlat, soonFlat, soonFlat, soonJump]);
+  check("0 disables the cutoff", e.getState().positions.length === 1);
+}
+
 section("drawdown brake");
 reset();
 {

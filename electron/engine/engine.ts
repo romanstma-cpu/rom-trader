@@ -93,6 +93,8 @@ export interface ScannerStats {
   skippedRegime: number;
   /** Blocked because the quotes moved but no contracts traded. */
   skippedQuiet: number;
+  /** Blocked because the market closes too soon — the endgame is not momentum. */
+  skippedClosing: number;
   scanMs: number;
 }
 
@@ -234,6 +236,30 @@ export class TradingEngine {
   private static readonly LOOKBACK = 3; // samples back for momentum
   private static readonly MAX_HISTORY = 20;
   private static readonly MAX_SIGNALS = 60;
+
+  /**
+   * The most of the trade budget a single stop-out may cost.
+   *
+   * Sizing by cost alone made dollar risk explode on cheap strikes: $10 at
+   * 15c bought 66 contracts, so the same 12c stop that costs $2.40 at 50c
+   * cost $7.92 — the first live soak's worst trade, nearly half its losses
+   * in one fill. At 0.25 the cap reproduces the historic sizing at mid
+   * prices exactly (20 contracts at 50c with a 12c stop) and only shrinks
+   * the tails: cheap strikes, and wide stops, now risk the same dollars as
+   * everything else.
+   */
+  private static readonly MAX_STOP_FRACTION = 0.25;
+
+  /** Contracts affordable at this price AND within the stop-risk budget. */
+  private sizeContracts(priceCents: number, factor: number): number {
+    const budget = this.settings.tradeSizeUsd * factor;
+    const byCost = Math.floor((budget * 100) / Math.max(1, priceCents));
+    const byRisk = Math.floor(
+      (budget * TradingEngine.MAX_STOP_FRACTION * 100) /
+        Math.max(1, this.settings.stopLossCents),
+    );
+    return Math.min(byCost, byRisk);
+  }
 
   /** Live orders still in flight, so a quit can wait for them to land. */
   private liveOps = new Set<Promise<unknown>>();
@@ -651,9 +677,17 @@ export class TradingEngine {
         s.skippedClock -
         s.skippedFees -
         s.skippedRegime -
-        s.skippedQuiet,
+        s.skippedQuiet -
+        s.skippedClosing,
     );
     const causes = [
+      {
+        n: s.skippedClosing,
+        msg:
+          `${s.skippedClosing} of ${s.marketsScanned} markets close within your ` +
+          `${this.settings.minMinutesToClose}-minute entry cutoff. The endgame is where strikes ` +
+          `snap to 0 or 100; lower "Min time to close" in Settings to trade it anyway.`,
+      },
       {
         n: s.skippedRegime,
         msg:
@@ -859,6 +893,7 @@ export class TradingEngine {
       skippedFees: 0,
       skippedRegime: 0,
       skippedQuiet: 0,
+      skippedClosing: 0,
       scanMs: 0,
     };
     const seen: Signal[] = [];
@@ -899,6 +934,19 @@ export class TradingEngine {
       } else if (m.yes_ask < this.settings.minPriceCents || m.yes_ask > this.settings.maxPriceCents) {
         reason = `price ${m.yes_ask}c outside ${this.settings.minPriceCents}–${this.settings.maxPriceCents}c`;
         stats.skippedPrice++;
+      } else if (
+        // The endgame gate. The whole sweep closes within two hours, so
+        // without this the engine trades nothing but final-minutes ladders,
+        // where strikes converge to 0c or 100c and a momentum entry is a bet
+        // on the resolution, not on a move. A market with no known close is
+        // let through rather than guessed at — old recordings have none.
+        this.settings.minMinutesToClose > 0 &&
+        m.close_ts > 0 &&
+        m.close_ts * 1000 - Date.now() < this.settings.minMinutesToClose * 60_000
+      ) {
+        const minsLeft = Math.max(0, Math.round((m.close_ts * 1000 - Date.now()) / 60_000));
+        reason = `closes in ${minsLeft}m — under your ${this.settings.minMinutesToClose}m entry cutoff`;
+        stats.skippedClosing++;
       } else if (spread > this.settings.maxSpreadCents) {
         // Buying at the ask while valuing at the bid means a wide spread is an
         // instant unrealized loss that trips the stop.
@@ -990,7 +1038,7 @@ export class TradingEngine {
 
   private openPosition(m: KalshiMarket): void {
     const factor = this.sizeFactor();
-    const contracts = Math.floor((this.settings.tradeSizeUsd * factor * 100) / m.yes_ask);
+    const contracts = this.sizeContracts(m.yes_ask, factor);
     if (contracts < 1) return;
     const costUsd = (m.yes_ask * contracts) / 100;
     if (costUsd > this.cashUsd) {
@@ -1059,7 +1107,7 @@ export class TradingEngine {
   private placeMakerOrder(m: KalshiMarket): void {
     const factor = this.sizeFactor();
     const limitCents = m.yes_bid;
-    const contracts = Math.floor((this.settings.tradeSizeUsd * factor * 100) / limitCents);
+    const contracts = this.sizeContracts(limitCents, factor);
     if (contracts < 1) return;
     const costUsd = (limitCents * contracts) / 100;
     if (costUsd > this.cashUsd) {

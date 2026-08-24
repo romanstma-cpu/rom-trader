@@ -468,6 +468,15 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             max={99}
             onChange={(v) => update({ maxPriceCents: v })}
           />
+          <NumberField
+            label="Min time to close"
+            suffix="min"
+            help="Skip markets closing within this many minutes. Near the close, strikes snap toward 0 or 100 and a momentum entry becomes a bet on the resolution itself. 0 disables."
+            value={settings.minMinutesToClose}
+            min={0}
+            max={115}
+            onChange={(v) => update({ minMinutesToClose: v })}
+          />
         </div>
         <Toggle
           label="Skip mean-reverting markets (regime filter)"

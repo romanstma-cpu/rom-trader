@@ -35,6 +35,7 @@ export interface ScannerStats {
   skippedFees: number;
   skippedRegime: number;
   skippedQuiet: number;
+  skippedClosing: number;
   scanMs: number;
 }
 
@@ -107,6 +108,7 @@ export interface Settings {
   maxDrawdownPct: number;
   momentumOnBid: boolean;
   requireTradeActivity: boolean;
+  minMinutesToClose: number;
 }
 
 export interface CredentialStatus {

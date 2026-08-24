@@ -73,6 +73,16 @@ export interface Settings {
    * quotes repositioning without prints is not momentum.
    */
   requireTradeActivity: boolean;
+  /**
+   * Refuse entries in markets closing within this many minutes. 0 disables.
+   *
+   * The sweep universe is markets closing within two hours, so without this
+   * gate the bot lives permanently in the endgame — the stretch where
+   * strikes converge to 0c or 100c and "momentum" is mostly resolution
+   * drift. The first live soak traded nothing but final-hour ladders and
+   * paid for it.
+   */
+  minMinutesToClose: number;
 }
 
 export interface AppState {
@@ -174,6 +184,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // per-trade loss of the old defaults. See docs/STRATEGY-FINDINGS.md.
   momentumOnBid: true,
   requireTradeActivity: true,
+  minMinutesToClose: 30,
 };
 
 export const DEFAULT_APP_STATE: AppState = {
@@ -283,6 +294,7 @@ function sanitize(s: Settings): Settings {
     maxDrawdownPct: num(s.maxDrawdownPct, 0, 95, DEFAULT_SETTINGS.maxDrawdownPct),
     momentumOnBid: Boolean(s.momentumOnBid),
     requireTradeActivity: Boolean(s.requireTradeActivity),
+    minMinutesToClose: num(s.minMinutesToClose, 0, 115, DEFAULT_SETTINGS.minMinutesToClose),
   };
 }
 

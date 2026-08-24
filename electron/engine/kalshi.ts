@@ -12,6 +12,8 @@ export interface KalshiMarket {
   volume: number;
   volume_24h: number;
   status: string;
+  /** Unix seconds when trading ends; 0 when the API did not say. */
+  close_ts: number;
 }
 
 /** Raw market shape from the current Kalshi API (dollar-string prices). */
@@ -24,6 +26,8 @@ interface RawMarket {
   volume_fp: string;
   volume_24h_fp: string;
   status: string;
+  close_time?: string; // ISO timestamp
+  close_ts?: number; // unix seconds, on older API shapes
   is_provisional?: boolean;
   mve_collection_ticker?: string;
 }
@@ -31,6 +35,13 @@ interface RawMarket {
 function toCents(dollars: string | undefined): number {
   const n = parseFloat(dollars ?? "0");
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+/** Close time in unix seconds from whichever field the API offered; 0 if neither. */
+function toCloseTs(m: RawMarket): number {
+  if (typeof m.close_ts === "number" && Number.isFinite(m.close_ts)) return m.close_ts;
+  const parsed = Date.parse(m.close_time ?? "");
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
 }
 
 export class KalshiClient {
@@ -119,6 +130,7 @@ export class KalshiClient {
           volume: parseFloat(m.volume_fp ?? "0") || 0,
           volume_24h: parseFloat(m.volume_24h_fp ?? "0") || 0,
           status: m.status,
+          close_ts: toCloseTs(m),
         }),
       )
       .filter((m) => m.yes_bid > 0 && m.yes_ask > 0 && m.yes_ask < 100)
@@ -151,6 +163,7 @@ export class KalshiClient {
         volume: parseFloat(m.volume_fp ?? "0") || 0,
         volume_24h: parseFloat(m.volume_24h_fp ?? "0") || 0,
         status: m.status ?? "unknown",
+        close_ts: toCloseTs(m),
       },
       status: m.status ?? "unknown",
       result: m.result ?? "",

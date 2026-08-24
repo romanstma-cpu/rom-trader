@@ -473,3 +473,43 @@ both sides, holding the position until quotes return.
 query never followed the cursor, so the volume sort ran over whichever
 thousand rows the server sent first. The fetch now follows the cursor a
 few pages, verified against the live API.
+
+---
+
+# 1.8.0: what twenty minutes of real trading taught
+
+The first live paper soak: 15 trades in 20 minutes, −$17.03, −$1.14 per
+trade — almost exactly the −$1.03 the replay predicted, which says the
+model is honest. The composition of the losses said the rest.
+
+## Every trade was an endgame trade
+
+All fifteen were hourly crypto ladders inside their final forty minutes —
+because the sweep universe is *markets closing within two hours*, so
+without a gate the bot lives permanently in the stretch where strikes
+converge to 0c or 100c and "momentum" is mostly the resolution arriving.
+New setting: **minMinutesToClose** (default 30) — no entries in markets
+closing sooner. Close times now ride through the recorder, and a market
+with no known close is let through rather than guessed at, so old
+recordings replay unchanged.
+
+## One trade lost $8.65 against a $2.40 design
+
+Sizing by cost alone made dollar risk explode on cheap strikes: $10 at
+15c bought 66 contracts, so the same 12c stop that costs $2.40 at 50c
+cost $7.92. The engine now sizes by cost **and** risk: a stop-out may
+consume at most a quarter of the trade budget, which reproduces the
+historic sizing at mid prices exactly and only shrinks the tails — cheap
+strikes and wide stops now risk the same dollars as everything else.
+
+## Where the full recording stands (449 scans, 3 segments, 463 markets)
+
+With risk-balanced sizing, the Patient preset posted the first positive
+full-configuration row this project has produced on real data: **PF
+1.04, +$0.56, 56% win rate — over 16 trades.** That is breakeven noise,
+not an edge, and it gets the same discount the sweep's own output
+applies to its nine-trade winners. What it is: the same configuration
+that has measured least-bad on every dataset — maker entries, strict
+gates, fewer trades — now hovering at zero instead of bleeding. The next
+soaks run Patient, and more hours of recording will say whether zero is
+where it lives or where it passed through.

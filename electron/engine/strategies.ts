@@ -33,6 +33,7 @@ export interface Strategy {
     | "maxDrawdownPct"
     | "momentumOnBid"
     | "requireTradeActivity"
+    | "minMinutesToClose"
   >;
 }
 
@@ -75,6 +76,7 @@ export const STRATEGIES: Strategy[] = [
       maxDrawdownPct: 15,
       momentumOnBid: true,
       requireTradeActivity: true,
+      minMinutesToClose: 45,
     },
   },
   {
@@ -107,6 +109,7 @@ export const STRATEGIES: Strategy[] = [
       maxDrawdownPct: 20,
       momentumOnBid: true,
       requireTradeActivity: true,
+      minMinutesToClose: 30,
     },
   },
   {
@@ -140,6 +143,7 @@ export const STRATEGIES: Strategy[] = [
       maxDrawdownPct: 25,
       momentumOnBid: true,
       requireTradeActivity: true,
+      minMinutesToClose: 15,
     },
   },
   {
@@ -178,6 +182,7 @@ export const STRATEGIES: Strategy[] = [
       maxDrawdownPct: 15,
       momentumOnBid: true,
       requireTradeActivity: true,
+      minMinutesToClose: 30,
     },
   },
 ];

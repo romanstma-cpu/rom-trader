@@ -184,6 +184,12 @@ export default function Dashboard({
                   <span className="v">{state.scanner.skippedQuiet}</span>
                 </div>
               )}
+              {state.scanner.skippedClosing > 0 && (
+                <div>
+                  <span className="k">Closing soon</span>
+                  <span className="v">{state.scanner.skippedClosing}</span>
+                </div>
+              )}
               <div>
                 <span className="k">Scan time</span>
                 <span className="v">{state.scanner.scanMs}ms</span>

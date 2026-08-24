@@ -34,6 +34,9 @@ function slim(m: KalshiMarket): KalshiMarket {
     yes_ask: m.yes_ask,
     volume: m.volume,
     status: m.status,
+    // Older recordings lack this; the close-time entry gate treats a missing
+    // close as unknown and lets the market through.
+    close_ts: m.close_ts,
   } as KalshiMarket;
 }
 
