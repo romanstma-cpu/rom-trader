@@ -249,6 +249,20 @@ export class TradingEngine {
   private static readonly MIN_REGIME_SAMPLES = 9;
 
   /**
+   * How long a ticker stays untouchable after losing in it.
+   *
+   * A stop-out is the market disproving the signal right there, and the
+   * ordinary cooldown let the same dying momentum re-trigger minutes later:
+   * across the first day of live soaking, eight re-entries into tickers that
+   * had already lost went one for eight, −$11.36 — a fifth of every dollar
+   * lost. An hour is effectively the rest of these markets' lives, so the
+   * rule is one disproof per market. Winning exits keep the short configured
+   * cooldown — re-entering strength is a different claim — and setting the
+   * cooldown to zero still disables both, churn being the user's right.
+   */
+  private static readonly LOSS_LOCKOUT_MS = 60 * 60_000;
+
+  /**
    * The most of the trade budget a single stop-out may cost.
    *
    * Sizing by cost alone made dollar risk explode on cheap strikes: $10 at
@@ -1000,8 +1014,12 @@ export class TradingEngine {
       } else if (this.coolingDown(m.ticker)) {
         // Without this the same tick that takes profit re-buys at the ask,
         // paying the spread again on a position we just sold at the bid.
+        // Long holds are the loss lockout: one disproof per market.
         const secs = Math.ceil(((this.cooldownUntil.get(m.ticker) ?? 0) - Date.now()) / 1000);
-        reason = `cooling down for ${secs}s after exiting`;
+        reason =
+          secs > 180
+            ? `locked out for ${Math.ceil(secs / 60)}m after losing here`
+            : `cooling down for ${secs}s after exiting`;
         stats.skippedCooldown++;
       } else {
         eligible = true;
@@ -1381,7 +1399,11 @@ export class TradingEngine {
 
     this.positions = this.positions.filter((x) => x !== p);
     if (cooldown && this.settings.reentryCooldownSeconds > 0) {
-      this.cooldownUntil.set(p.ticker, Date.now() + this.settings.reentryCooldownSeconds * 1000);
+      const holdMs =
+        pnlUsd < 0
+          ? TradingEngine.LOSS_LOCKOUT_MS
+          : this.settings.reentryCooldownSeconds * 1000;
+      this.cooldownUntil.set(p.ticker, Date.now() + holdMs);
     }
     const rec: TradeRecord = {
       ticker: p.ticker,

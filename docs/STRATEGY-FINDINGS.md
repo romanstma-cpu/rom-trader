@@ -593,6 +593,42 @@ without), the risk cap kept every stop near its design cost, and the
 day's live equity finished positive (+$6.93) even after the losing
 stints.
 
+---
+
+# 1.9.2: one disproof per market
+
+The autopsy of the first 55 live trades, by the cut that mattered:
+
+| cut | result |
+|---|---|
+| held under 2 minutes | 17 trades, 2W/15L, **−$29.89** |
+| held over 2 minutes | 38 trades, net **+$5.15** |
+| re-entries into a ticker already down today | 8 trades, 1 win, **−$11.36** |
+| first meeting with a ticker | 47 trades, −$13.38 |
+| stops gapping past the line | 14 of 24, $6.75 of slippage |
+
+The whole net loss and more lives in trades that died within two
+minutes, and a fifth of every dollar lost came from re-buying markets
+that had already stopped us out. A stop-out is the market disproving
+the signal right there; the 90–120 second cooldown then let the same
+dying momentum re-trigger. **After a losing exit, the ticker now locks
+out for an hour** — effectively the rest of these markets' lives, so
+the rule is one disproof per market. Winning exits keep the short
+configured cooldown, because re-entering strength is a different claim,
+and a cooldown of zero still disables everything.
+
+On the recording as it stands (2,152 scans, 647 minutes, six
+segments), Patient reads **−$3.86, PF 0.78** — its best full-dataset
+figure since the hostile evening entered the data — while ungated
+defaults sit at −$48.27. Different datasets before and after the
+lockout, so that is direction, not attribution; the one-for-eight live
+record is what earned the change.
+
+Also observed and deliberately not acted on: entries between 45c and
+65c ran 4W/13L (−$21.95). The band has a mechanism smell — peak fee,
+maximum uncertainty — but seventeen trades is a coin reading, and the
+price-band settings already let anyone act on it by hand.
+
 The mechanism 1.9.1 adds came from both live loss clusters telling the
 same story: **the engine was trading markets it had only just met.**
 The regime filter abstained below nine samples — waving through exactly

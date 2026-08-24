@@ -1149,6 +1149,59 @@ reset();
   check("the gate off keeps the old behaviour", e.getState().positions.length === 1);
 }
 
+section("losing in a market locks it out");
+reset();
+{
+  // A win cools down briefly and can be re-entered — same as always.
+  const flatW = [mkt("KXLOCK", 40, 41)];
+  const jumpW = [mkt("KXLOCK", 45, 46)];
+  const winBook = [mkt("KXLOCK", 60, 61)]; // +14 past entry: take-profit
+  const reJump = [mkt("KXLOCK", 66, 67)]; // fresh momentum right after
+  let e = runEngine({ reentryCooldownSeconds: 90 }, [flatW, flatW, flatW, flatW, jumpW, winBook, reJump]);
+  check(
+    "a win cools down at the configured length",
+    e.getSignals().some((s) => s.reason.includes("cooling down for")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // A loss locks the ticker out for the hour, not for the cooldown.
+  clearHistory();
+  const lossBook = [mkt("KXLOCK", 30, 31)]; // −15 past entry: stop-loss
+  const back = [mkt("KXLOCK", 30, 31)];
+  const reUp = [mkt("KXLOCK", 35, 36)]; // momentum returns in the same market
+  e = runEngine({ reentryCooldownSeconds: 90 }, [
+    flatW, flatW, flatW, flatW, jumpW, lossBook, back, back, back, reUp,
+  ]);
+  check("the re-signal after a loss is refused", e.getState().positions.length === 0);
+  check(
+    "— and named as a lockout, in minutes",
+    e.getSignals().some((s) => s.reason.includes("locked out") && s.reason.includes("m after losing")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // The one-disproof rule is scoped to the ticker, not the market family.
+  clearHistory();
+  const other = (bid: number, ask: number) => [mkt("KXLOCK", 30, 31), mkt("KXOTHER", bid, ask)];
+  e = runEngine({ reentryCooldownSeconds: 90 }, [
+    [mkt("KXLOCK", 40, 41), mkt("KXOTHER", 40, 41)],
+    [mkt("KXLOCK", 40, 41), mkt("KXOTHER", 40, 41)],
+    [mkt("KXLOCK", 40, 41), mkt("KXOTHER", 40, 41)],
+    [mkt("KXLOCK", 40, 41), mkt("KXOTHER", 40, 41)],
+    [mkt("KXLOCK", 45, 46), mkt("KXOTHER", 40, 41)],
+    other(40, 41),
+    other(45, 46),
+  ]);
+  check("an unrelated market still trades after the loss", e.getState().positions.length === 1);
+  check("— and it is the other one", e.getState().positions[0]?.ticker === "KXOTHER");
+
+  // Cooldown 0 still means churn is allowed, losses included.
+  clearHistory();
+  e = runEngine({ reentryCooldownSeconds: 0 }, [
+    flatW, flatW, flatW, flatW, jumpW, lossBook, back, back, back, reUp,
+  ]);
+  check("cooldown 0 disables the lockout too", e.getState().positions.length === 1);
+}
+
 section("risk-balanced sizing");
 reset();
 {
