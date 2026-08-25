@@ -739,3 +739,32 @@ Sixteen hours of recorded market, no edge anywhere in the grid. The
 live sessions stand as reported; Monday evening net −$1.54 (5W/5L),
 with the win side and the loss side both concentrated in the one
 ladder this release is about.
+
+---
+
+# 1.10.1: a stop that cannot fire is not a stop
+
+Found by Monday evening's flatten, generalised by the sibling
+Polymarket bot hitting the same wall from the percentage side the
+same week. The stop-loss exit waits for the bid to fall stopLossCents
+below entry — so from an entry at or under that distance, the trigger
+price is zero or negative, somewhere no bid can go. A 10c entry with
+a 12c stop has no stop at all: one rode 10c down to 1c for 64
+minutes, −91% of its cost, and only closed because the engine was
+stopped. Its true risk was the entire stake, and the risk-balanced
+sizing was quietly computing with a fiction.
+
+The gate refuses entries at or under the configured stop distance and
+says so in the signal feed. Not measured in replay — a dead stop is a
+correctness defect like a crossed book, not a strategy to A/B; the
+figure that motivates it is the −91% ride that a working stop would
+have cut at −12c. Entries one cent above the distance stay allowed:
+a thin stop is thin, but it exists, and Monday's one 13c entry with a
+1c-deep stop took profit at +16c.
+
+The overnight chop session (5h, 9 trades, −$8.36, 7 stops/2 TPs)
+gets its honest line too: the 1.10.0 ladder rules held — losses
+spread across seven different ladders, no stacking, no cascade — and
+the streak brake halted on four consecutive losses that were, for the
+first time, genuinely independent. The strategy still loses in chop.
+Nothing here claims otherwise.

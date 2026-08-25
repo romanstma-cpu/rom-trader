@@ -1005,6 +1005,16 @@ export class TradingEngine {
       } else if (m.yes_ask < this.settings.minPriceCents || m.yes_ask > this.settings.maxPriceCents) {
         reason = `price ${m.yes_ask}c outside ${this.settings.minPriceCents}–${this.settings.maxPriceCents}c`;
         stats.skippedPrice++;
+      } else if (this.settings.stopLossCents > 0 && m.yes_ask <= this.settings.stopLossCents) {
+        // A stop that cannot fire is not a stop. The exit rule waits for the
+        // bid to fall stopLossCents below entry, and from an entry at or
+        // under that distance the trigger price is zero or negative — a
+        // place no bid can go. One of these rode 10c down to 1c for an hour,
+        // -91% of its cost, and only closed because the engine stopped:
+        // its true stop was the entire stake. (The sibling Polymarket bot
+        // hit the same wall the same week, from the percentage side.)
+        reason = `a ${this.settings.stopLossCents}c stop can never fire from ${m.yes_ask}c — the true risk is the whole stake`;
+        stats.skippedPrice++;
       } else if (
         // The endgame gate. The whole sweep closes within two hours, so
         // without this the engine trades nothing but final-minutes ladders,

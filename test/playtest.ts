@@ -1219,6 +1219,35 @@ reset();
   check("cooldown 0 disables the lockout too", e.getState().positions.length === 1);
 }
 
+section("a stop that cannot fire is not a stop");
+reset();
+{
+  // The exit rule waits for the bid to fall stopLossCents below entry, so
+  // from an entry at or under that distance the trigger price is zero or
+  // negative — unreachable. One live position rode 10c down to 1c for an
+  // hour, −91% of cost, stop never firing.
+  const cheapFlat = [mkt("KXDEAD", 7, 8)];
+  const cheapJump = [mkt("KXDEAD", 11, 12)]; // ask 12 == default 12c stop
+  let e = runEngine({}, [cheapFlat, cheapFlat, cheapFlat, cheapFlat, cheapJump]);
+  check("an entry at the stop distance is refused", e.getState().positions.length === 0);
+  check(
+    "and the signal says the stop cannot fire",
+    e.getSignals().some((s) => s.reason.includes("can never fire")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+  check("it counts as a price skip", (e.getState().scanner?.skippedPrice ?? 0) > 0);
+
+  // One cent above the distance the stop exists again, however thin.
+  const liveFlat = [mkt("KXDEAD2", 8, 9)];
+  const liveJump = [mkt("KXDEAD2", 12, 13)]; // ask 13 > 12c stop
+  e = runEngine({}, [liveFlat, liveFlat, liveFlat, liveFlat, liveJump]);
+  check("one cent of reachable stop admits the entry", e.getState().positions.length === 1);
+
+  // A tighter stop moves the line with it.
+  e = runEngine({ stopLossCents: 8 }, [cheapFlat, cheapFlat, cheapFlat, cheapFlat, cheapJump]);
+  check("the gate tracks the configured stop", e.getState().positions.length === 1);
+}
+
 section("one event ladder is one bet");
 reset();
 {
