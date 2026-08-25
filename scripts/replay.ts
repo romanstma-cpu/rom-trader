@@ -78,6 +78,7 @@ function replaySegment(scans: Scan[], settings: Settings): SegmentResult {
   );
   const d = engine as unknown as {
     status: string;
+    setClock: (t: number) => void;
     processPendingOrders: (m: KalshiMarket[]) => void;
     updatePositions: (m: KalshiMarket[]) => void;
     scanForEntries: (m: KalshiMarket[], t: number) => void;
@@ -91,7 +92,9 @@ function replaySegment(scans: Scan[], settings: Settings): SegmentResult {
   const equity: { ts: number; equityUsd: number }[] = [];
   for (const scan of scans) {
     if (d.status !== "running") break;
-    // Mirrors tick(), same as backtest.ts — and must stay mirrored.
+    // Mirrors tick(), same as backtest.ts — and must stay mirrored. The
+    // clock first: cooldowns and lockouts expire on recorded time here.
+    d.setClock(scan.ts);
     d.processPendingOrders(scan.markets);
     d.updatePositions(scan.markets);
     d.scanForEntries(scan.markets, scan.ts);
@@ -227,6 +230,10 @@ function main(): void {
 
   const rows: ReplayResult[] = [
     replay(segs, base, "defaults (taker)"),
+    // The 1.10.0 ladder cap, isolated: identical rules with stacking allowed
+    // again. Half of the soak's entries stacked an already-held ladder, and
+    // 18 of its 34 stop-losses came in same-ladder cascades.
+    replay(segs, { ...base, maxPositionsPerEvent: 99 }, "defaults, ladder cap off"),
     // The clean A/B: identical rules, only the entry mechanics differ.
     replay(segs, { ...base, makerEntries: true, makerTtlTicks: 4 }, "defaults + maker ttl4"),
     replay(segs, { ...base, makerEntries: true, makerTtlTicks: 8 }, "defaults + maker ttl8"),

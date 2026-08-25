@@ -15,6 +15,7 @@ import {
 const FIELD_LABELS: Partial<Record<keyof Settings, string>> = {
   tradeSizeUsd: "Trade size",
   maxPositions: "Max open positions",
+  maxPositionsPerEvent: "Max per event ladder",
   dryRunCash: "Paper cash",
   dailyLossLimitUsd: "Daily loss limit",
   maxConsecutiveLosses: "Stop after losses in a row",
@@ -194,6 +195,14 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             min={1}
             max={50}
             onChange={(v) => update({ maxPositions: v })}
+          />
+          <NumberField
+            label="Max per event ladder"
+            help="Most positions held at once across sibling strikes of one event, like the hourly Bitcoin ladder. Sibling strikes move together, so holding three of them is one bet at triple size — and one reversal stops them all out together."
+            value={settings.maxPositionsPerEvent}
+            min={1}
+            max={50}
+            onChange={(v) => update({ maxPositionsPerEvent: v })}
           />
           <NumberField
             label="Paper cash"

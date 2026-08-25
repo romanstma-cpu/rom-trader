@@ -15,6 +15,7 @@ export interface Strategy {
     Settings,
     | "tradeSizeUsd"
     | "maxPositions"
+    | "maxPositionsPerEvent"
     | "momentumThresholdCents"
     | "takeProfitCents"
     | "stopLossCents"
@@ -58,6 +59,7 @@ export const STRATEGIES: Strategy[] = [
     params: {
       tradeSizeUsd: 5,
       maxPositions: 3,
+      maxPositionsPerEvent: 1,
       momentumThresholdCents: 4,
       takeProfitCents: 14,
       stopLossCents: 14,
@@ -93,6 +95,7 @@ export const STRATEGIES: Strategy[] = [
     params: {
       tradeSizeUsd: 10,
       maxPositions: 5,
+      maxPositionsPerEvent: 1,
       momentumThresholdCents: 3,
       takeProfitCents: 12,
       stopLossCents: 12,
@@ -127,6 +130,7 @@ export const STRATEGIES: Strategy[] = [
     params: {
       tradeSizeUsd: 8,
       maxPositions: 8,
+      maxPositionsPerEvent: 1,
       momentumThresholdCents: 2,
       takeProfitCents: 8,
       stopLossCents: 8,
@@ -164,6 +168,7 @@ export const STRATEGIES: Strategy[] = [
     params: {
       tradeSizeUsd: 8,
       maxPositions: 4,
+      maxPositionsPerEvent: 1,
       momentumThresholdCents: 4,
       takeProfitCents: 12,
       stopLossCents: 12,

@@ -312,7 +312,11 @@ const mkt = (ticker: string, bid: number, ask: number): Mkt => ({
 });
 
 /** Drive private tick internals with a scripted market book. */
-function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
+function runEngine(
+  settings: Partial<typeof DEFAULT_SETTINGS>,
+  books: Mkt[][],
+  stepMs = 15_000,
+) {
   const e = new TradingEngine({
     ...DEFAULT_SETTINGS,
     // The scripted books reuse static objects whose volume never changes, so
@@ -325,6 +329,7 @@ function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
   });
   const anyE = e as unknown as {
     status: string;
+    setClock: (t: number) => void;
     processPendingOrders: (m: Mkt[]) => void;
     updatePositions: (m: Mkt[]) => void;
     scanForEntries: (m: Mkt[], t: number) => void;
@@ -333,15 +338,22 @@ function runEngine(settings: Partial<typeof DEFAULT_SETTINGS>, books: Mkt[][]) {
     enforceMaxDrawdown: () => void;
   };
   anyE.status = "running";
+  // One tick of clock per book, the way recorded scans carry their own
+  // timestamps: cooldowns and lockouts in these tests expire on scan time,
+  // exactly as they do in replays. A test that needs hours to pass hands in
+  // a bigger step instead of hundreds of books.
+  let clock = Date.now();
   for (const book of books) {
     // Mirrors the order in tick(); a step left out here passes in tests and
     // then does nothing (or something different) in the running app.
+    anyE.setClock(clock);
     anyE.processPendingOrders(book);
     anyE.updatePositions(book);
-    anyE.scanForEntries(book, Date.now());
+    anyE.scanForEntries(book, clock);
     anyE.enforceDailyLossLimit();
     anyE.enforceLosingStreak();
     anyE.enforceMaxDrawdown();
+    clock += stepMs;
   }
   return e;
 }
@@ -730,14 +742,18 @@ reset();
 
   const anyE = e as unknown as {
     status: string;
+    setClock: (t: number) => void;
     updatePositions: (m: Mkt[]) => void;
     scanForEntries: (m: Mkt[], t: number) => void;
   };
   anyE.status = "running";
   const flat4 = [mkt("KXE", 40, 41)];
+  let evClock = Date.now();
   for (const b of [flat4, flat4, flat4, flat4, [mkt("KXE", 45, 46)]]) {
+    anyE.setClock(evClock);
     anyE.updatePositions(b);
-    anyE.scanForEntries(b, Date.now());
+    anyE.scanForEntries(b, evClock);
+    evClock += 15_000;
   }
   check("opening a position raises an event", events.some((x) => x.kind === "opened"));
 
@@ -1179,7 +1195,8 @@ reset();
     e.getSignals()[0]?.reason ?? "no signals",
   );
 
-  // The one-disproof rule is scoped to the ticker, not the market family.
+  // The one-disproof rule never leaks to an unrelated series — only sibling
+  // strikes of the same event share it, which has its own section below.
   clearHistory();
   const other = (bid: number, ask: number) => [mkt("KXLOCK", 30, 31), mkt("KXOTHER", bid, ask)];
   e = runEngine({ reentryCooldownSeconds: 90 }, [
@@ -1200,6 +1217,130 @@ reset();
     flatW, flatW, flatW, flatW, jumpW, lossBook, back, back, back, reUp,
   ]);
   check("cooldown 0 disables the lockout too", e.getState().positions.length === 1);
+}
+
+section("one event ladder is one bet");
+reset();
+{
+  // Sibling strikes of one event — KXBTC-T50 and KXBTC-T30 both price the
+  // same underlying. Half of the first two soak days' entries stacked a
+  // ladder already held, and 18 of 34 stop-losses arrived in same-ladder
+  // cascades: five adjacent BTC strikes won together, then four of them
+  // stopped out inside three minutes and tripped the losing-streak brake
+  // with what was one market move.
+  const lad = (a: [number, number], b: [number, number], oth?: [number, number]) => {
+    const books = [mkt("KXBTC-T50", a[0], a[1]), mkt("KXBTC-T30", b[0], b[1])];
+    if (oth) books.push(mkt("KXOTH", oth[0], oth[1]));
+    return books;
+  };
+  const flatL = lad([40, 41], [40, 41], [40, 41]);
+  const jumpL = lad([45, 46], [45, 46], [45, 46]);
+  let e = runEngine({}, [flatL, flatL, flatL, flatL, jumpL]);
+  check(
+    "the default cap holds one strike per ladder",
+    e.getState().positions.filter((p) => p.ticker.startsWith("KXBTC")).length === 1,
+  );
+  check(
+    "an unrelated market still enters alongside it",
+    e.getState().positions.some((p) => p.ticker === "KXOTH"),
+  );
+  check("the scanner counts the ladder skip", (e.getState().scanner?.skippedEvent ?? 0) > 0);
+  check(
+    "and says why",
+    e.getSignals().some((s) => s.reason.includes("sibling strikes are the same bet")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // Raising the cap admits the second strike; a third sibling still waits.
+  clearHistory();
+  const three = (n: number) => [
+    mkt("KXBTC-T50", n, n + 1), mkt("KXBTC-T30", n, n + 1), mkt("KXBTC-T20", n, n + 1),
+  ];
+  e = runEngine({ maxPositionsPerEvent: 2 }, [three(40), three(40), three(40), three(40), three(45)]);
+  check("a cap of two admits two strikes, not three", e.getState().positions.length === 2);
+
+  // A resting maker order holds the ladder slot the moment it is placed.
+  clearHistory();
+  e = runEngine({ makerEntries: true }, [flatL, flatL, flatL, flatL, jumpL]);
+  const st = e.getState();
+  check(
+    "a resting order counts toward the ladder cap",
+    st.pendingOrders.filter((o) => o.ticker.startsWith("KXBTC")).length === 1 &&
+      st.positions.filter((p) => p.ticker.startsWith("KXBTC")).length === 0,
+    `pending ${st.pendingOrders.length}, open ${st.positions.length}`,
+  );
+
+  // A stop-loss on one strike locks the whole ladder, not just its own line.
+  // The evening this rule comes from: the engine stopped out of three BTC
+  // strikes and then bought a fourth 45 seconds later, into the same dip.
+  clearHistory();
+  const lossT50 = lad([30, 31], [45, 46]); // T50 crashes through its stop
+  const reT30 = lad([30, 31], [50, 51]); // fresh momentum on the sibling
+  e = runEngine({}, [
+    lad([40, 41], [40, 41]), lad([40, 41], [40, 41]), lad([40, 41], [40, 41]),
+    lad([40, 41], [40, 41]), lad([45, 46], [45, 46]), lossT50, reT30,
+  ]);
+  check("a sibling's loss refuses the whole ladder", e.getState().positions.length === 0);
+  check(
+    "and the signal blames the ladder",
+    e.getSignals().some((s) => s.reason.includes("ladder stopped out")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // The ladder lock expires on scan time — 45-minute steps, so the sibling
+  // is still locked one book after the loss and free two books after.
+  clearHistory();
+  const reT30More = lad([30, 31], [55, 56]);
+  e = runEngine(
+    {},
+    [
+      lad([40, 41], [40, 41]), lad([40, 41], [40, 41]), lad([40, 41], [40, 41]),
+      lad([40, 41], [40, 41]), lad([45, 46], [45, 46]), lossT50, reT30, reT30More,
+    ],
+    45 * 60_000,
+  );
+  check(
+    "the ladder lock expires on the scan clock",
+    e.getState().positions.some((p) => p.ticker === "KXBTC-T30"),
+    e.getState().positions.map((p) => p.ticker).join(",") || "no positions",
+  );
+
+  // A win never locks the ladder: strength continuing into the next strike
+  // is a different claim from a stop-out disproving it.
+  clearHistory();
+  const winT50 = lad([60, 61], [45, 46]); // T50 through its take-profit
+  const jumpT30 = lad([60, 61], [55, 56]);
+  e = runEngine({}, [
+    lad([40, 41], [40, 41]), lad([40, 41], [40, 41]), lad([40, 41], [40, 41]),
+    lad([40, 41], [40, 41]), lad([45, 46], [45, 46]), winT50, jumpT30,
+  ]);
+  check(
+    "a sibling's win leaves the ladder open",
+    e.getState().positions.some((p) => p.ticker === "KXBTC-T30"),
+    e.getState().positions.map((p) => p.ticker).join(",") || "no positions",
+  );
+}
+
+section("cooldowns run on the scan clock");
+reset();
+{
+  // The regression this section pins down: cooldowns used to be set and
+  // checked against Date.now(), so inside a replay — where an hour of market
+  // time passes in seconds of wall time — no cooldown ever expired and no
+  // lockout ever ended. Sixty-second steps here mean the whole run takes
+  // milliseconds of wall time; only the scan clock can admit the re-entry.
+  const f = [mkt("KXCLK", 40, 41)];
+  const e = runEngine(
+    { reentryCooldownSeconds: 90 },
+    [f, f, f, f, [mkt("KXCLK", 45, 46)], [mkt("KXCLK", 60, 61)],
+      [mkt("KXCLK", 66, 67)], [mkt("KXCLK", 72, 73)]],
+    60_000,
+  );
+  check(
+    "a win cooldown expires on scan time, not wall time",
+    e.getState().positions.length === 1,
+    `positions ${e.getState().positions.length}`,
+  );
 }
 
 section("risk-balanced sizing");

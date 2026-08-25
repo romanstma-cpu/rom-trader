@@ -672,3 +672,70 @@ flat-but-well-observed book that wakes up still passes, because a quiet
 market breaking out is the one thing a momentum rule exists for. This
 reverses a deliberate earlier choice, and the test that encoded the old
 choice now encodes the evidence.
+
+---
+
+# 1.10.0: one ladder is one bet
+
+The Monday-evening soak wrote the cleanest mechanism picture this
+project has produced. Five take-profits in a row riding one BTC hourly
+rally — then four stop-losses inside three minutes when the same rally
+pulled back, tripping the losing-streak brake and parking the engine
+for the night. All four "consecutive" losses were adjacent strikes of
+the same KXBTCD ladder. One market move, booked as four independent
+losses, judged by the brake as a losing streak.
+
+The full history says this was the pattern, not the exception: **37 of
+77 entries stacked onto an event ladder already held** (up to three
+deep), and **18 of 34 stop-losses arrived in same-ladder cascades** —
+seven cascades, −$47.27, more than half of everything the stops ever
+cost. The engine also once re-entered a sibling strike 45 seconds into
+a cascade and stopped out instantly: the loss lockout was honoring the
+exact ticker that lost while buying the strike next door.
+
+Two mechanisms ship:
+
+- **maxPositionsPerEvent** (default 1): at most one concurrent
+  position — resting orders included — per event ladder. Sibling
+  strikes price the same underlying; holding three of them is one bet
+  at triple size.
+- **The loss lockout widens from ticker to ladder**: a stop-out on one
+  strike locks every sibling for the hour. Winning exits keep the
+  short ticker-scoped cooldown — strength continuing into the next
+  strike is a different claim — and cooldown 0 still disables both.
+
+**What the replay says, honestly:** on 3,041 scans (957 minutes, 8
+segments, 2,400 markets) the cap changes expectancy by nothing worth
+claiming — defaults −$102.26 over 116 trades against −$97.47 over 170
+with the cap off. Both dreadful; the gap is noise. The cap is not an
+edge and this document will not pretend it is one. Its case is the
+thing the replay cannot see: replays run brakes-off, so they never pay
+for a correlated cascade tripping the streak brake — which live cost
+an evening of uptime and counted one market move as four losses. The
+cap is a risk-shape default, adjustable in Settings like the global
+position cap it sits next to.
+
+# And a second clock bug, caught by the first one's rule
+
+The 1.9.3 rule — anything in the scan path uses the scan's own clock —
+turned out to have a second violator: cooldowns and lockouts were set
+and checked against the wall clock. In a replay, where an hour of
+market time passes in seconds of wall time, **no cooldown ever expired
+and no loss lockout ever ended.** Every replay since the lockout
+shipped in 1.9.2 (including 1.9.3's "honest verdict" figures) ran with
+effectively permanent per-ticker lockouts — a conservative bias
+(fewer re-entries than the live engine would take), unlike the 1.9.3
+bug, but a wrong clock all the same. The engine now carries a single
+scan clock, set by live ticks and by every replay driver, and the
+cooldown machinery, trade timestamps and lockouts all read it. A
+regression test advances scan time with milliseconds of wall time and
+requires the cooldown to expire on schedule.
+
+The corrected full-recording verdict, with both clocks telling the
+truth: everything is still negative. Defaults −$102.26/116, Patient
+−$55.38/57 (PF 0.34), the sweep's best out-of-sample candidate −$5.74
+on 31 unseen trades — every candidate loses on data it had not seen.
+Sixteen hours of recorded market, no edge anywhere in the grid. The
+live sessions stand as reported; Monday evening net −$1.54 (5W/5L),
+with the win side and the loss side both concentrated in the one
+ladder this release is about.

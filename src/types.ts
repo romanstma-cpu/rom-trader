@@ -32,6 +32,7 @@ export interface ScannerStats {
   skippedPrice: number;
   skippedWarmup: number;
   skippedCooldown: number;
+  skippedEvent: number;
   skippedClock: number;
   skippedFees: number;
   skippedRegime: number;
@@ -88,6 +89,8 @@ export interface Settings {
   dryRunCash: number;
   tradeSizeUsd: number;
   maxPositions: number;
+  /** Most concurrent positions within one event ladder (sibling strikes). */
+  maxPositionsPerEvent: number;
   momentumThresholdCents: number;
   takeProfitCents: number;
   stopLossCents: number;

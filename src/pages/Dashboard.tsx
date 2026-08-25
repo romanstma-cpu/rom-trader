@@ -190,6 +190,12 @@ export default function Dashboard({
                   <span className="v">{state.scanner.skippedClosing}</span>
                 </div>
               )}
+              {state.scanner.skippedEvent > 0 && (
+                <div>
+                  <span className="k">Ladder held/locked</span>
+                  <span className="v">{state.scanner.skippedEvent}</span>
+                </div>
+              )}
               <div>
                 <span className="k">Scan time</span>
                 <span className="v">{state.scanner.scanMs}ms</span>

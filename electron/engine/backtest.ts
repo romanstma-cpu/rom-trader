@@ -43,6 +43,7 @@ export interface BacktestResult {
 /** The engine members a replay needs, which are private for live use. */
 interface Drivable {
   status: string;
+  setClock: (t: number) => void;
   processPendingOrders: (m: KalshiMarket[]) => void;
   updatePositions: (m: KalshiMarket[]) => void;
   scanForEntries: (m: KalshiMarket[], t: number) => void;
@@ -82,7 +83,10 @@ export function runBacktest(
     for (const scan of seg) {
       if (drivable.status !== "running") break; // a brake stopped it
       // Mirrors the order in tick(); a step left out here passes in replays
-      // and then behaves differently in the running app.
+      // and then behaves differently in the running app. The clock comes
+      // first: cooldowns and lockouts must expire on recorded time, or an
+      // hour-long lockout simply never ends inside a replay.
+      drivable.setClock(scan.ts);
       drivable.processPendingOrders(scan.markets);
       drivable.updatePositions(scan.markets);
       drivable.scanForEntries(scan.markets, scan.ts);

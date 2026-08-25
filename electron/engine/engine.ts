@@ -89,6 +89,8 @@ export interface ScannerStats {
   skippedPrice: number;
   skippedWarmup: number;
   skippedCooldown: number;
+  /** Refused because the event ladder is already held or locked by a sibling's loss. */
+  skippedEvent: number;
   /** Blocked because the clock is outside the configured trading window. */
   skippedClock: number;
   /** Blocked because the take-profit cannot clear the fees by enough. */
@@ -233,6 +235,17 @@ export class TradingEngine {
    */
   private priceHistory = new Map<string, MarketSample[]>();
   private cooldownUntil = new Map<string, number>(); // ticker -> ms timestamp
+  private eventLockoutUntil = new Map<string, number>(); // event ladder -> ms timestamp
+  /**
+   * The scan clock: the current tick's own timestamp, set at the top of
+   * tick() live and by the replay driver for every recorded scan. Everything
+   * time-shaped inside the scan path — cooldowns, lockouts, trade timestamps
+   * — reads this through now(), never Date.now() directly. The close gate
+   * already learned this the hard way in 1.9.3; the cooldowns had the same
+   * bug in the other direction, quietly never expiring inside a replay
+   * because an hour of wall clock never passes during one.
+   */
+  private clockMs = 0;
   private signals: Signal[] = [];
   private scanner: ScannerStats | null = null;
   private emptyScans = 0;
@@ -261,6 +274,18 @@ export class TradingEngine {
    * cooldown to zero still disables both, churn being the user's right.
    */
   private static readonly LOSS_LOCKOUT_MS = 60 * 60_000;
+
+  /**
+   * The event ladder a strike ticker belongs to: KXBTCD-26AUG2420-T78699.99
+   * and KXBTCD-26AUG2420-T78799.99 are both KXBTCD-26AUG2420. Sibling strikes
+   * price the same underlying at different lines, so they move together — a
+   * fact the ledger, the cooldowns and the losing-streak brake all need.
+   * Tickers without a strike suffix are their own event.
+   */
+  static eventOf(ticker: string): string {
+    const i = ticker.search(/-[TB][\d.]+$/);
+    return i > 0 ? ticker.slice(0, i) : ticker;
+  }
 
   /**
    * The most of the trade budget a single stop-out may cost.
@@ -555,6 +580,7 @@ export class TradingEngine {
     this.startedAt = Date.now();
     this.priceHistory.clear();
     this.cooldownUntil.clear();
+    this.eventLockoutUntil.clear();
     this.pendingOrders = [];
     this.signals = [];
     this.emptyScans = 0;
@@ -605,6 +631,7 @@ export class TradingEngine {
     if (this.ticking) return;
     this.ticking = true;
     const began = Date.now();
+    this.setClock(began);
     try {
       const markets = await this.client.getActiveMarkets(40);
       this.lastTickAt = Date.now();
@@ -702,6 +729,7 @@ export class TradingEngine {
         s.skippedPrice -
         s.skippedWarmup -
         s.skippedCooldown -
+        s.skippedEvent -
         s.skippedClock -
         s.skippedFees -
         s.skippedRegime -
@@ -754,14 +782,51 @@ export class TradingEngine {
     return `No entries in the last ${this.emptyScans} scans. ${causes[0].msg}`;
   }
 
+  /** Live ticks set this from their own clock; replays set it per recorded scan. */
+  private setClock(t: number): void {
+    this.clockMs = t;
+  }
+
+  /**
+   * The scan clock, falling back to the wall only before the first tick.
+   * Between live ticks this is at most one interval stale, which the
+   * 90-second cooldowns and hour-long lockouts never notice; in a replay it
+   * is the only clock telling the truth.
+   */
+  private now(): number {
+    return this.clockMs || Date.now();
+  }
+
   private coolingDown(ticker: string): boolean {
     const until = this.cooldownUntil.get(ticker);
     if (until === undefined) return false;
-    if (Date.now() >= until) {
+    if (this.now() >= until) {
       this.cooldownUntil.delete(ticker);
       return false;
     }
     return true;
+  }
+
+  /** Milliseconds this ticker's event ladder stays locked after a sibling's loss. */
+  private eventLockRemaining(ticker: string): number {
+    const ev = TradingEngine.eventOf(ticker);
+    const until = this.eventLockoutUntil.get(ev);
+    if (until === undefined) return 0;
+    const left = until - this.now();
+    if (left <= 0) {
+      this.eventLockoutUntil.delete(ev);
+      return 0;
+    }
+    return left;
+  }
+
+  /** Open positions plus resting orders on this ticker's event ladder. */
+  private eventExposure(ticker: string): number {
+    const ev = TradingEngine.eventOf(ticker);
+    return (
+      this.positions.filter((p) => TradingEngine.eventOf(p.ticker) === ev).length +
+      this.pendingOrders.filter((o) => TradingEngine.eventOf(o.ticker) === ev).length
+    );
   }
 
   private mid(m: KalshiMarket): number {
@@ -893,6 +958,7 @@ export class TradingEngine {
       skippedPrice: 0,
       skippedWarmup: 0,
       skippedCooldown: 0,
+      skippedEvent: 0,
       skippedClock: 0,
       skippedFees: 0,
       skippedRegime: 0,
@@ -929,6 +995,7 @@ export class TradingEngine {
       let eligible = false;
       let reason: string;
       let autocorr: number | null = null;
+      let evLockMs = 0;
 
       if (!clockAllows) {
         // Checked first so that outside the window every market says the same
@@ -1020,13 +1087,30 @@ export class TradingEngine {
       } else if (this.coolingDown(m.ticker)) {
         // Without this the same tick that takes profit re-buys at the ask,
         // paying the spread again on a position we just sold at the bid.
-        // Long holds are the loss lockout: one disproof per market.
-        const secs = Math.ceil(((this.cooldownUntil.get(m.ticker) ?? 0) - Date.now()) / 1000);
-        reason =
-          secs > 180
-            ? `locked out for ${Math.ceil(secs / 60)}m after losing here`
-            : `cooling down for ${secs}s after exiting`;
+        const secs = Math.ceil(((this.cooldownUntil.get(m.ticker) ?? 0) - this.now()) / 1000);
+        reason = `cooling down for ${secs}s after exiting`;
         stats.skippedCooldown++;
+      } else if ((evLockMs = this.eventLockRemaining(m.ticker)) > 0) {
+        // A stop-out on one strike is the underlying disproving the move, and
+        // every sibling strike prices the same underlying. The engine used to
+        // honour the loss lockout on the exact ticker that lost while buying
+        // the strike next door 45 seconds later — same ladder, same dip, same
+        // stop. One disproof per ladder, not per line on it.
+        const mins = Math.ceil(evLockMs / 60_000);
+        reason =
+          TradingEngine.eventOf(m.ticker) === m.ticker
+            ? `locked out for ${mins}m after losing here`
+            : `its ladder stopped out — locked for ${mins}m after losing there`;
+        stats.skippedEvent++;
+      } else if (this.eventExposure(m.ticker) >= this.settings.maxPositionsPerEvent) {
+        // Sibling strikes move together, so stacking them is one bet at
+        // multiplied size: half of the first two soak days' entries stacked
+        // an already-held ladder, and one reversal then booked three or four
+        // "independent" stop-losses inside as many minutes.
+        reason =
+          `already holding ${this.settings.maxPositionsPerEvent === 1 ? "a position" : "positions"} ` +
+          `on this ladder — sibling strikes are the same bet`;
+        stats.skippedEvent++;
       } else {
         eligible = true;
         stats.eligible++;
@@ -1043,7 +1127,7 @@ export class TradingEngine {
         changeCents: change,
         eligible,
         reason,
-        ts: Date.now(),
+        ts: this.now(),
       });
 
       if (!eligible) continue;
@@ -1111,7 +1195,7 @@ export class TradingEngine {
       entryFeeUsd,
       tpRestingCents: null,
       tpOrderId: null,
-      openedAt: Date.now(),
+      openedAt: this.now(),
     });
     this.restTakeProfit(this.positions[this.positions.length - 1]);
     this.log(
@@ -1154,7 +1238,7 @@ export class TradingEngine {
       limitCents,
       contracts,
       costUsd,
-      placedAt: Date.now(),
+      placedAt: this.now(),
       ticksLeft: this.settings.makerTtlTicks,
       orderId: null,
     };
@@ -1290,7 +1374,7 @@ export class TradingEngine {
       entryFeeUsd: 0,
       tpRestingCents: null,
       tpOrderId: null,
-      openedAt: Date.now(),
+      openedAt: this.now(),
     });
     this.restTakeProfit(this.positions[this.positions.length - 1]);
 
@@ -1405,11 +1489,19 @@ export class TradingEngine {
 
     this.positions = this.positions.filter((x) => x !== p);
     if (cooldown && this.settings.reentryCooldownSeconds > 0) {
-      const holdMs =
-        pnlUsd < 0
-          ? TradingEngine.LOSS_LOCKOUT_MS
-          : this.settings.reentryCooldownSeconds * 1000;
-      this.cooldownUntil.set(p.ticker, Date.now() + holdMs);
+      if (pnlUsd < 0) {
+        // The loss lockout, widened from the ticker to its whole ladder in
+        // 1.10.0: a stop on one strike is the underlying disproving the move
+        // for every sibling too. Winning exits keep the short ticker-scoped
+        // cooldown — strength continuing into the next strike is a different
+        // claim — and a zero cooldown still disables both.
+        this.eventLockoutUntil.set(
+          TradingEngine.eventOf(p.ticker),
+          this.now() + TradingEngine.LOSS_LOCKOUT_MS,
+        );
+      } else {
+        this.cooldownUntil.set(p.ticker, this.now() + this.settings.reentryCooldownSeconds * 1000);
+      }
     }
     const rec: TradeRecord = {
       ticker: p.ticker,
@@ -1420,7 +1512,7 @@ export class TradingEngine {
       contracts: p.contracts,
       pnlUsd,
       openedAt: p.openedAt,
-      closedAt: Date.now(),
+      closedAt: this.now(),
       reason,
       dryRun: !this.isLive,
     };

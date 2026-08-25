@@ -12,6 +12,16 @@ export interface Settings {
   dryRunCash: number; // starting paper cash in USD
   tradeSizeUsd: number; // per-trade budget in USD
   maxPositions: number;
+  /**
+   * Most concurrent positions (resting orders included) within one event
+   * ladder — sibling strikes of the same underlying. Adjacent strikes move
+   * together: across the first two days of live soaking, half of all entries
+   * stacked onto ladders already held, and more than half of every stop-loss
+   * arrived in same-ladder cascades — one market move booked as three or
+   * four "independent" losses, which is also what kept tripping the
+   * losing-streak brake with what was really a single bad bet.
+   */
+  maxPositionsPerEvent: number;
   momentumThresholdCents: number;
   takeProfitCents: number;
   stopLossCents: number;
@@ -163,6 +173,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dryRunCash: 100,
   tradeSizeUsd: 10,
   maxPositions: 5,
+  maxPositionsPerEvent: 1,
   momentumThresholdCents: 3,
   // Must clear the ~3.5c round-trip fee plus the 2c spread with room to
   // spare, or a win is not worth taking. See docs/STRATEGY-FINDINGS.md.
@@ -279,6 +290,9 @@ function sanitize(s: Settings): Settings {
     dryRunCash: num(s.dryRunCash, 1, 1_000_000, DEFAULT_SETTINGS.dryRunCash),
     tradeSizeUsd: num(s.tradeSizeUsd, 1, 100_000, DEFAULT_SETTINGS.tradeSizeUsd),
     maxPositions: Math.round(num(s.maxPositions, 1, 50, DEFAULT_SETTINGS.maxPositions)),
+    maxPositionsPerEvent: Math.round(
+      num(s.maxPositionsPerEvent, 1, 50, DEFAULT_SETTINGS.maxPositionsPerEvent),
+    ),
     // Fallbacks reference DEFAULT_SETTINGS rather than repeating numbers:
     // hardcoded copies drifted once already, quietly restoring the pre-1.4.0
     // take-profit of 6c whenever a hand-edited file held garbage.
