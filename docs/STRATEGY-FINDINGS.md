@@ -768,3 +768,36 @@ spread across seven different ladders, no stacking, no cascade — and
 the streak brake halted on four consecutive losses that were, for the
 first time, genuinely independent. The strategy still loses in chop.
 Nothing here claims otherwise.
+
+---
+
+# 1.11.0: a staircase is momentum; a jump is a head-fake
+
+The momentum trigger measures net change over the window, so a single
+gapped tick that then mean-reverts qualifies exactly like a steady
+climb - and the autopsied instant-stop cluster was full of that shape.
+The climb gate (requireConsistentMove) demands that strictly more than
+half of the window steps rise; flat steps count against, deliberately,
+because one jump followed by two flat scans is a move the market is
+sitting on, not making.
+
+Measured on 5,531 recorded scans (27 hours of market, 9 segments,
+4,001 markets) before any default changed: the gate refused 15% of
+default entries and improved every number that survived - P&L
+-$131.70 against -$170.76, per-trade -$0.92 against -$1.02, win rate
+45% against 43%, profit factor 0.46 against 0.43. Everything is still
+negative; this is a smaller shovel, not a ladder out. It ships ON by
+the same standard as the 1.6.0 gates: a pure-refusal gate that
+measured better on real data can only skip a trade, never create one.
+
+The same replay also re-scored the ladder cap on the grown recording:
+cap off now reads -$221.77 over 281 trades against -$170.76 over 168
+with the cap - on this larger dataset the cap side is better in total
+and the earlier "no material difference" reading has aged toward the
+cap. Still noise-adjacent per trade; the risk-shape argument remains
+the real case.
+
+The History page now carries the exit-reason breakdown and the
+under-two-minute stop count - the first two cuts of every autopsy this
+document has ever run - so the person running the bot sees what the
+analysis sees without exporting a CSV.

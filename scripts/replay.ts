@@ -234,6 +234,10 @@ function main(): void {
     // again. Half of the soak's entries stacked an already-held ladder, and
     // 18 of its 34 stop-losses came in same-ladder cascades.
     replay(segs, { ...base, maxPositionsPerEvent: 99 }, "defaults, ladder cap off"),
+    // The climb gate: more than half the window's steps must rise, so a
+    // single gapped tick cannot trigger an entry on its own. Measured here
+    // before any default changes.
+    replay(segs, { ...base, requireConsistentMove: true }, "defaults + climb gate"),
     // The clean A/B: identical rules, only the entry mechanics differ.
     replay(segs, { ...base, makerEntries: true, makerTtlTicks: 4 }, "defaults + maker ttl4"),
     replay(segs, { ...base, makerEntries: true, makerTtlTicks: 8 }, "defaults + maker ttl8"),

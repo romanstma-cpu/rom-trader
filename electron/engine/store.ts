@@ -84,6 +84,13 @@ export interface Settings {
    */
   requireTradeActivity: boolean;
   /**
+   * Refuse entries whose move came as one jump rather than a climb: more
+   * than half of the window's steps must rise. A single gapped tick passes
+   * the size trigger and then mean-reverts — the instant-stop cluster in
+   * the trade autopsy was full of exactly that shape.
+   */
+  requireConsistentMove: boolean;
+  /**
    * Rest the take-profit sell at the target instead of exiting as a taker.
    *
    * A taker win sells at the bid and pays the fee — two to three cents per
@@ -203,6 +210,11 @@ export const DEFAULT_SETTINGS: Settings = {
   // per-trade loss of the old defaults. See docs/STRATEGY-FINDINGS.md.
   momentumOnBid: true,
   requireTradeActivity: true,
+  // On by default: measured on 5,531 recorded scans before shipping, the
+  // gate refused 15% of entries and improved every remaining number — see
+  // docs/STRATEGY-FINDINGS.md. Like the 1.6.0 gates, it can only skip a
+  // trade, never create one.
+  requireConsistentMove: true,
   makerExits: false,
   minMinutesToClose: 30,
 };
@@ -317,6 +329,7 @@ function sanitize(s: Settings): Settings {
     maxDrawdownPct: num(s.maxDrawdownPct, 0, 95, DEFAULT_SETTINGS.maxDrawdownPct),
     momentumOnBid: Boolean(s.momentumOnBid),
     requireTradeActivity: Boolean(s.requireTradeActivity),
+    requireConsistentMove: Boolean(s.requireConsistentMove),
     makerExits: Boolean(s.makerExits),
     minMinutesToClose: num(s.minMinutesToClose, 0, 115, DEFAULT_SETTINGS.minMinutesToClose),
   };

@@ -196,6 +196,12 @@ export default function Dashboard({
                   <span className="v">{state.scanner.skippedEvent}</span>
                 </div>
               )}
+              {state.scanner.skippedJumpy > 0 && (
+                <div>
+                  <span className="k">One jump, not a climb</span>
+                  <span className="v">{state.scanner.skippedJumpy}</span>
+                </div>
+              )}
               <div>
                 <span className="k">Scan time</span>
                 <span className="v">{state.scanner.scanMs}ms</span>

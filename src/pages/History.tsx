@@ -43,6 +43,27 @@ export default function History({ onChanged }: { onChanged: () => void }) {
   // trades across many. The per-trade numbers are what carry over.
   const metrics = useMemo(() => computeMetrics(scoped, []), [scoped]);
 
+  // How trades ended, and what each way of ending cost. The same cut every
+  // session autopsy starts with, so it belongs on the page rather than in a
+  // spreadsheet: a strategy whose stop-losses dwarf its take-profits is
+  // telling you something the win rate hides.
+  const byReason = useMemo(() => {
+    const acc = new Map<string, { n: number; pnl: number }>();
+    for (const r of scoped) {
+      const key = r.reason.startsWith("settled") ? "settled" : r.reason;
+      const e = acc.get(key) ?? { n: 0, pnl: 0 };
+      e.n += 1;
+      e.pnl += r.pnlUsd;
+      acc.set(key, e);
+    }
+    return [...acc.entries()].sort((a, b) => a[1].pnl - b[1].pnl);
+  }, [scoped]);
+
+  const quickStops = useMemo(() => {
+    const q = scoped.filter((r) => r.pnlUsd < 0 && r.closedAt - r.openedAt < 120_000);
+    return { n: q.length, pnl: q.reduce((s, r) => s + r.pnlUsd, 0) };
+  }, [scoped]);
+
   const shown = useMemo(() => {
     const f =
       filter === "wins"
@@ -153,6 +174,37 @@ export default function History({ onChanged }: { onChanged: () => void }) {
           <div className="hint">longest runs</div>
         </div>
       </div>
+
+      {byReason.length > 1 && (
+        <div className="card">
+          <div className="card-title">How trades closed</div>
+          <table className="compact">
+            <thead>
+              <tr>
+                <th>Exit</th>
+                <th>Trades</th>
+                <th>P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byReason.map(([reason, e]) => (
+                <tr key={reason}>
+                  <td>{reason}</td>
+                  <td className="muted">{e.n}</td>
+                  <td className={pnlClass(e.pnl)}>{signedMoney(e.pnl)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {quickStops.n > 0 && (
+            <div className="hint" style={{ marginTop: 8 }}>
+              {quickStops.n} stop{quickStops.n === 1 ? "" : "s"} hit within two minutes of entry
+              ({signedMoney(quickStops.pnl)}) — entries that were wrong almost immediately, the
+              shape the entry gates exist to reduce.
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="toolbar">
         <div className="segmented">

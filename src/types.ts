@@ -33,6 +33,7 @@ export interface ScannerStats {
   skippedWarmup: number;
   skippedCooldown: number;
   skippedEvent: number;
+  skippedJumpy: number;
   skippedClock: number;
   skippedFees: number;
   skippedRegime: number;
@@ -112,6 +113,8 @@ export interface Settings {
   maxDrawdownPct: number;
   momentumOnBid: boolean;
   requireTradeActivity: boolean;
+  /** Refuse single-jump moves: more than half the window's steps must rise. */
+  requireConsistentMove: boolean;
   makerExits: boolean;
   minMinutesToClose: number;
 }

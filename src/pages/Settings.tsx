@@ -349,6 +349,12 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           checked={settings.requireTradeActivity}
           onChange={(v) => update({ requireTradeActivity: v })}
         />
+        <Toggle
+          label="Require a climb, not a jump"
+          help="Skip entries whose whole move arrived as one gapped tick. A staircase is momentum; a single jump is usually a head-fake that reverts on the next scan."
+          checked={settings.requireConsistentMove}
+          onChange={(v) => update({ requireConsistentMove: v })}
+        />
         {settings.takeProfitCents <= settings.stopLossCents && (
           <div className="notice warn">
             Your take-profit is not larger than your stop, so you need to win well over half your

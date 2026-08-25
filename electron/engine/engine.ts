@@ -91,6 +91,8 @@ export interface ScannerStats {
   skippedCooldown: number;
   /** Refused because the event ladder is already held or locked by a sibling's loss. */
   skippedEvent: number;
+  /** Refused because the move was one jump rather than a consistent climb. */
+  skippedJumpy: number;
   /** Blocked because the clock is outside the configured trading window. */
   skippedClock: number;
   /** Blocked because the take-profit cannot clear the fees by enough. */
@@ -285,6 +287,26 @@ export class TradingEngine {
   static eventOf(ticker: string): string {
     const i = ticker.search(/-[TB][\d.]+$/);
     return i > 0 ? ticker.slice(0, i) : ticker;
+  }
+
+  /**
+   * Whether a price series rose on most of its steps, not just in total.
+   *
+   * Entries are long-YES on a positive net move, so only upward consistency
+   * is asked for: strictly more than half of the steps must rise. Flat
+   * steps count against, deliberately — one gapped tick followed by two
+   * flat scans is a jump the market is sitting on, not a climb, and the
+   * jump-then-revert shape is what the instant-stop autopsy was full of.
+   * With the standard four-point window this means two of three steps up.
+   */
+  static consistentClimb(prices: number[]): boolean {
+    const steps = prices.length - 1;
+    if (steps < 1) return false;
+    let ups = 0;
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i] > prices[i - 1]) ups++;
+    }
+    return ups * 2 > steps;
   }
 
   /**
@@ -730,6 +752,7 @@ export class TradingEngine {
         s.skippedWarmup -
         s.skippedCooldown -
         s.skippedEvent -
+        s.skippedJumpy -
         s.skippedClock -
         s.skippedFees -
         s.skippedRegime -
@@ -959,6 +982,7 @@ export class TradingEngine {
       skippedWarmup: 0,
       skippedCooldown: 0,
       skippedEvent: 0,
+      skippedJumpy: 0,
       skippedClock: 0,
       skippedFees: 0,
       skippedRegime: 0,
@@ -1053,6 +1077,17 @@ export class TradingEngine {
         // nobody actually paid a higher price. That is not momentum.
         reason = `no contracts traded in the window — the move is quotes, not trades`;
         stats.skippedQuiet++;
+      } else if (
+        this.settings.requireConsistentMove &&
+        !TradingEngine.consistentClimb(hist.slice(-(TradingEngine.LOOKBACK + 1)).map(src))
+      ) {
+        // A staircase is momentum; a single jump is a head-fake. The whole
+        // trigger can be one gapped tick that mean-reverts on the next scan
+        // — the autopsied instant-stop cluster was full of those. Requiring
+        // most steps of the window to climb costs the gap trades and keeps
+        // the walks.
+        reason = `the ${fmtCents(change)} move is one jump, not a climb — steps disagree`;
+        stats.skippedJumpy++;
       } else if (
         // A maker enters at the bid and pays no entry fee; a taker enters at
         // the ask and pays the fee twice. The edge check has to price the

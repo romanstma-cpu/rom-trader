@@ -325,6 +325,7 @@ function runEngine(
     // their own dedicated section, and any test that wants one passes it.
     momentumOnBid: false,
     requireTradeActivity: false,
+    requireConsistentMove: false,
     ...settings,
   });
   const anyE = e as unknown as {
@@ -737,6 +738,7 @@ reset();
     momentumThresholdCents: 3,
     momentumOnBid: false,
     requireTradeActivity: false,
+    requireConsistentMove: false,
   });
   e.subscribe({ onState: () => {}, onLog: () => {}, onEvent: (ev) => events.push(ev) });
 
@@ -762,7 +764,7 @@ reset();
   check("every event carries a tone", events.every((x) => x.tone.length > 0));
 
   // A subscriber with no onEvent must not crash the engine.
-  const quiet = new TradingEngine({ ...DEFAULT_SETTINGS });
+  const quiet = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false });
   quiet.subscribe({ onState: () => {}, onLog: () => {} });
   let threwQuiet = false;
   try {
@@ -992,7 +994,7 @@ reset();
     });
   });
   const makerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS, makerEntries: true }, "maker");
-  const takerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS }, "taker");
+  const takerRun = runBacktest(ladder as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "taker");
   check("a runaway market fills the taker, not the maker", takerRun.trades > 0 && makerRun.trades === 0);
   check("the unfilled maker run ends flat, not negative", makerRun.pnlUsd === 0);
   check(
@@ -1217,6 +1219,42 @@ reset();
     flatW, flatW, flatW, flatW, jumpW, lossBook, back, back, back, reUp,
   ]);
   check("cooldown 0 disables the lockout too", e.getState().positions.length === 1);
+}
+
+section("a climb is momentum; a jump is a head-fake");
+reset();
+{
+  // Same 5c of net move, two shapes: a staircase and a single gapped tick.
+  const stairs = [
+    [mkt("KXCLIMB", 40, 41)], [mkt("KXCLIMB", 40, 41)], [mkt("KXCLIMB", 40, 41)],
+    [mkt("KXCLIMB", 42, 43)], [mkt("KXCLIMB", 44, 45)], [mkt("KXCLIMB", 45, 46)],
+  ];
+  const gap = [
+    [mkt("KXGAP", 40, 41)], [mkt("KXGAP", 40, 41)], [mkt("KXGAP", 40, 41)],
+    [mkt("KXGAP", 40, 41)], [mkt("KXGAP", 40, 41)], [mkt("KXGAP", 45, 46)],
+  ];
+  let e = runEngine({ requireConsistentMove: true }, stairs);
+  check("a staircase move enters", e.getState().positions.length === 1);
+
+  e = runEngine({ requireConsistentMove: true }, gap);
+  check("a single-jump move is refused", e.getState().positions.length === 0);
+  check("the scanner counts the jumpy skip", (e.getState().scanner?.skippedJumpy ?? 0) > 0);
+  check(
+    "and the signal names the shape",
+    e.getSignals().some((s) => s.reason.includes("one jump, not a climb")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  e = runEngine({ requireConsistentMove: false }, gap);
+  check("the gate off keeps the old behaviour", e.getState().positions.length === 1);
+
+  // The helper itself, at the edges.
+  const cc = (xs: number[]) => TradingEngine.consistentClimb(xs);
+  check("two rising steps of three pass, flat tail and all", cc([40, 42, 44, 44]));
+  check("one rise with two flats fails", cc([40, 42, 42, 42]) === false);
+  check("one jump then flat fails", cc([40, 45, 45, 45]) === false);
+  check("all rising passes", cc([40, 41, 42, 43]));
+  check("too short refuses", cc([40]) === false);
 }
 
 section("a stop that cannot fire is not a stop");
@@ -1460,14 +1498,14 @@ reset();
     oldScan(0, 40, 41, 5400), oldScan(1, 40, 41, 5400), oldScan(2, 40, 41, 5400),
     oldScan(3, 40, 41, 5400), oldScan(4, 45, 46, 5400),
   ];
-  const past = runBacktest(oldScans as never, { ...DEFAULT_SETTINGS }, "past");
+  const past = runBacktest(oldScans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "past");
   check("an old recording with time to close still trades", past.trades > 0, `${past.trades} trades`);
 
   const oldSoon = [
     oldScan(0, 40, 41, 600), oldScan(1, 40, 41, 600), oldScan(2, 40, 41, 600),
     oldScan(3, 40, 41, 600), oldScan(4, 45, 46, 600),
   ];
-  const pastSoon = runBacktest(oldSoon as never, { ...DEFAULT_SETTINGS }, "past-soon");
+  const pastSoon = runBacktest(oldSoon as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "past-soon");
   check("— while its genuinely near-close markets are still refused", pastSoon.trades === 0);
 }
 
@@ -1550,7 +1588,7 @@ section("performance metrics");
       markets: [{ ...mkt("KXMM", p, p + 1), volume: 100 + i * 20 }],
     });
   });
-  const bt = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "metrics");
+  const bt = runBacktest(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "metrics");
   check("backtests report metrics", bt.metrics.trades === bt.trades);
 }
 
@@ -1631,7 +1669,7 @@ reset();
   // The defence the splitting exists for: prices jump 5c across an hour-long
   // seam. Unsegmented, that seam reads as one 15-second momentum burst and
   // the replay buys it; segmented, each side is quiet and nothing trades.
-  const seamResult = runBacktest(gapped as never, { ...DEFAULT_SETTINGS }, "seam");
+  const seamResult = runBacktest(gapped as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "seam");
   check("a seam jump is not traded as momentum", seamResult.trades === 0, `${seamResult.trades} trades`);
 
   // The same 5c move without the gap is genuine momentum and must still trade
@@ -1640,7 +1678,7 @@ reset();
     ...[0, 1, 2, 3, 4].map((i) => scan(t0 + i * 15000, 40, 41, 100 + i * 20)),
     ...[5, 6, 7, 8, 9].map((i) => scan(t0 + i * 15000, 45, 46, 100 + i * 20)),
   ];
-  const genuineResult = runBacktest(genuine as never, { ...DEFAULT_SETTINGS }, "genuine");
+  const genuineResult = runBacktest(genuine as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "genuine");
   check("the same move without a gap still trades", genuineResult.trades > 0);
   check(
     "an end-of-recording close says so",
@@ -1682,20 +1720,20 @@ clearRecording();
 
   // Replays must not touch the user's real history or equity.
   const historyBefore = loadHistory().length;
-  runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "isolated");
+  runBacktest(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "isolated");
   check("a replay leaves real history alone", loadHistory().length === historyBefore);
 
   // Determinism: the same input twice must give the same answer, or the
   // comparison the whole page is built on means nothing.
-  const a = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "a");
-  const b = runBacktest(scans as never, { ...DEFAULT_SETTINGS }, "b");
+  const a = runBacktest(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "a");
+  const b = runBacktest(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false }, "b");
   check(
     "the same data and settings replay identically",
     a.trades === b.trades && a.pnlUsd === b.pnlUsd && a.wins === b.wins,
     `${a.trades}/${a.pnlUsd} vs ${b.trades}/${b.pnlUsd}`,
   );
 
-  const all = compareStrategies(scans as never, { ...DEFAULT_SETTINGS });
+  const all = compareStrategies(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false });
   check("comparison covers your settings plus every preset", all.length === STRATEGIES.length + 1);
   check("your settings come first", all[0].label === "Your settings");
   check("every preset is named", STRATEGIES.every((s) => all.some((r) => r.label === s.name)));
@@ -1717,7 +1755,7 @@ reset();
     });
   }
 
-  const report = runSweep(scans as never, { ...DEFAULT_SETTINGS });
+  const report = runSweep(scans as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false });
   check(
     "the split is 60/40 by time",
     report.scansTrain === 30 && report.scansTest === 20,
@@ -1753,7 +1791,7 @@ reset();
       markets: [{ ...mkt("KXLK", p, p + 1), volume: 100 + i * 15 }],
     });
   }
-  const luckyReport = runSweep(lucky as never, { ...DEFAULT_SETTINGS });
+  const luckyReport = runSweep(lucky as never, { ...DEFAULT_SETTINGS, requireConsistentMove: false });
   check(
     "a tiny-sample winner exists to test against",
     (luckyReport.bestOutOfSample?.testPnlUsd ?? 0) > 0 &&
@@ -1826,7 +1864,7 @@ reset();
   };
 
   // YES settles at 100c: full payout, no exit fee — settlement is not a sale.
-  let e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  let e = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false });
   let anyE = e as unknown as Settleable;
   anyE.status = "running";
   anyE.cashUsd = 90;
@@ -1841,7 +1879,7 @@ reset();
   check("the exit price is the settlement", settled?.exitCents === 100);
 
   // NO settles at 0c: the position expires worthless.
-  e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  e = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false });
   anyE = e as unknown as Settleable;
   anyE.status = "running";
   anyE.cashUsd = 90;
@@ -1853,7 +1891,7 @@ reset();
     loadHistory().find((t) => t.ticker === "KXLOSE")?.pnlUsd === -8.25);
 
   // A settlement without a yes/no result must wait, not guess.
-  e = new TradingEngine({ ...DEFAULT_SETTINGS });
+  e = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false });
   anyE = e as unknown as Settleable;
   anyE.status = "running";
   const odd = posFor("KXODD");
@@ -1967,7 +2005,7 @@ void (async () => {
       refreshMissingMarkets: (m: Mkt[]) => Promise<Mkt[]>;
     };
     const engineWithClient = (client: unknown): RefreshInternals => {
-      const e = new TradingEngine({ ...DEFAULT_SETTINGS }) as unknown as RefreshInternals;
+      const e = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false }) as unknown as RefreshInternals;
       e.status = "running";
       e.client = client;
       return e;
@@ -2094,7 +2132,7 @@ void (async () => {
     check("a hung order cannot hold the quit hostage", waited < 1500, `${waited}ms`);
 
     // Nothing in flight resolves immediately — dry-run quits pay no toll.
-    const idle = new TradingEngine({ ...DEFAULT_SETTINGS });
+    const idle = new TradingEngine({ ...DEFAULT_SETTINGS, requireConsistentMove: false });
     const t1 = Date.now();
     await idle.drainLiveOrders(4000);
     check("an idle engine drains instantly", Date.now() - t1 < 100);
