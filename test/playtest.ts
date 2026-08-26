@@ -13,7 +13,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TradingEngine } from "../electron/engine/engine";
-import { KalshiClient } from "../electron/engine/kalshi";
+import { KalshiApiError, KalshiClient } from "../electron/engine/kalshi";
 import { STRATEGIES, findStrategy } from "../electron/engine/strategies";
 import {
   DEFAULT_SETTINGS,
@@ -2186,6 +2186,187 @@ void (async () => {
     live.positions = [];
     live.attachTpOrderId(gone, "late-tp");
     check("a late take-profit id for a gone position is cancelled", cancelled.includes("late-tp"));
+  }
+
+  section("a refused entry never becomes a position");
+  reset();
+  {
+    const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+    type EntryInternals = {
+      status: string;
+      cashUsd: number;
+      client: unknown;
+      positions: { ticker: string; tpOrderId: string | null }[];
+      openPosition: (m: unknown) => void;
+    };
+    const market = {
+      ticker: "KXREFUSE", title: "refused market", yes_bid: 40, yes_ask: 42,
+      last_price: 41, volume: 500, volume_24h: 900, status: "active",
+      close_ts: Math.floor(Date.now() / 1000) + 7200,
+    };
+
+    const e = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true, tradeSizeUsd: 10 },
+      liveCreds,
+    ) as unknown as EntryInternals;
+    e.status = "running";
+    e.cashUsd = 100;
+    const cancelled: string[] = [];
+    e.client = {
+      hasAuth: true,
+      placeOrder: async () => {
+        throw new Error("insufficient funds");
+      },
+      cancelOrder: async (id: string) => void cancelled.push(id),
+    };
+
+    e.openPosition(market);
+    check("the position is held while the order is in flight", e.positions.length === 1);
+    const cashWhileOpen = e.cashUsd;
+    check("its cost is debited immediately", cashWhileOpen < 100);
+
+    await new Promise((r) => setTimeout(r, 10)); // let the rejection land
+    check("a refused buy leaves no position behind", e.positions.length === 0);
+    check("the money comes back", Math.abs(e.cashUsd - 100) < 0.001, `cash ${e.cashUsd}`);
+
+    // With maker exits on, a take-profit is rested the instant the position
+    // opens — it must not outlive an entry that was refused.
+    const withTp = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true, tradeSizeUsd: 10, makerExits: true },
+      liveCreds,
+    ) as unknown as EntryInternals;
+    withTp.status = "running";
+    withTp.cashUsd = 100;
+    const tpCancelled: string[] = [];
+    withTp.client = {
+      hasAuth: true,
+      // Slower than the take-profit below, so the id is attached before the
+      // rejection arrives — the case where a stray order can actually be left.
+      placeOrder: () =>
+        new Promise((_r, reject) => setTimeout(() => reject(new Error("market closed")), 20)),
+      placeLimitSell: async () => "tp-orphan",
+      cancelOrder: async (id: string) => void tpCancelled.push(id),
+    };
+    withTp.openPosition({ ...market, ticker: "KXORPHAN" });
+    await new Promise((r) => setTimeout(r, 60));
+    check("the refused entry took its take-profit with it", tpCancelled.includes("tp-orphan"));
+    check("and left no position", withTp.positions.length === 0);
+    check("a voided entry is not recorded as a trade", loadHistory().length === 0);
+  }
+
+  section("an exit is booked only once the sell is accepted");
+  reset();
+  {
+    const liveCreds = { apiKeyId: "id", apiPrivateKeyPem: "pem" };
+    type ExitInternals = {
+      status: string;
+      cashUsd: number;
+      client: unknown;
+      positions: unknown[];
+      haltedReason: string | null;
+      closePosition: (p: unknown, reason: string) => void;
+    };
+    const freshPos = (ticker: string) => ({
+      ticker, title: "t", side: "yes", entryCents: 40, contracts: 10,
+      currentBidCents: 41, peakMidCents: 41, unrealizedUsd: 0, entryFeeUsd: 0.1,
+      tpRestingCents: null as number | null, tpOrderId: null as string | null,
+      openedAt: Date.now(),
+    });
+
+    // 1. A sell that fails leaves the position exactly where it was.
+    const failing = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true },
+      liveCreds,
+    ) as unknown as ExitInternals;
+    failing.status = "running";
+    failing.cashUsd = 100;
+    const sentIds: (string | undefined)[] = [];
+    failing.client = {
+      hasAuth: true,
+      placeOrder: async (p: { clientOrderId?: string }) => {
+        sentIds.push(p.clientOrderId);
+        throw new Error("network down");
+      },
+      cancelOrder: async () => {},
+    };
+    const stuck = freshPos("KXSTUCK");
+    failing.positions = [stuck];
+    failing.closePosition(stuck, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("a failed sell keeps the position open", failing.positions.length === 1);
+    check("and books nothing to history", loadHistory().length === 0);
+    check("the cash is not credited for a sale that did not happen", failing.cashUsd === 100);
+
+    // 2. The retry is the same order, not another one.
+    failing.closePosition(stuck, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("the exit is retried on the next scan", sentIds.length === 2);
+    check(
+      "the retry reuses one client_order_id, so it cannot double-sell",
+      sentIds[0] !== undefined && sentIds[0] === sentIds[1],
+      `${sentIds[0]} vs ${sentIds[1]}`,
+    );
+
+    // 3. The third failure gives up: halt, and the position stays put.
+    failing.closePosition(stuck, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("it stops trying after three attempts", sentIds.length === 3);
+    check("the engine halts itself", failing.haltedReason !== null);
+    check(
+      "the halt names the position still open at Kalshi",
+      (failing.haltedReason ?? "").includes("KXSTUCK"),
+    );
+    check("which is still in the ledger, not silently closed", failing.positions.length === 1);
+    check("and still absent from history", loadHistory().length === 0);
+    failing.closePosition(stuck, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("a fourth attempt is refused", sentIds.length === 3);
+
+    // 4. A 409 means Kalshi already has this order — the first attempt landed.
+    reset();
+    const dup = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true },
+      liveCreds,
+    ) as unknown as ExitInternals;
+    dup.status = "running";
+    dup.cashUsd = 100;
+    let dupAttempts = 0;
+    dup.client = {
+      hasAuth: true,
+      placeOrder: async () => {
+        dupAttempts++;
+        if (dupAttempts === 1) throw new Error("connection reset");
+        throw new KalshiApiError("Kalshi POST /portfolio/orders -> 409: duplicate", 409);
+      },
+      cancelOrder: async () => {},
+    };
+    const raced = freshPos("KXDUP");
+    dup.positions = [raced];
+    dup.closePosition(raced, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("the lost answer leaves the position open", dup.positions.length === 1);
+    dup.closePosition(raced, "stop-loss");
+    await new Promise((r) => setTimeout(r, 10));
+    check("a duplicate rejection is read as the original having filled", dup.positions.length === 0);
+    check("so the exit is booked once", loadHistory().length === 1);
+    check("the engine does not halt over it", dup.haltedReason === null);
+
+    // 5. The ordinary case still works.
+    reset();
+    const ok = new TradingEngine(
+      { ...DEFAULT_SETTINGS, liveMode: true },
+      liveCreds,
+    ) as unknown as ExitInternals;
+    ok.status = "running";
+    ok.cashUsd = 100;
+    ok.client = { hasAuth: true, placeOrder: async () => ({}), cancelOrder: async () => {} };
+    const good = freshPos("KXFINE");
+    ok.positions = [good];
+    ok.closePosition(good, "take-profit");
+    await new Promise((r) => setTimeout(r, 10));
+    check("an accepted sell closes the position", ok.positions.length === 0);
+    check("and records the trade", loadHistory().length === 1);
+    check("crediting the proceeds", ok.cashUsd > 100, `cash ${ok.cashUsd}`);
   }
 
   // ------------------------------------------------- api client resilience

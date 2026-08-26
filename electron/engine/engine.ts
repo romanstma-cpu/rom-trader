@@ -1,5 +1,6 @@
+import * as crypto from "node:crypto";
 import type { Credentials } from "./credentials";
-import { KalshiClient, KalshiMarket } from "./kalshi";
+import { KalshiApiError, KalshiClient, KalshiMarket } from "./kalshi";
 import {
   netEdgeCents,
   roundTripFeeCentsPerContract,
@@ -35,6 +36,17 @@ export interface Position {
   /** Kalshi's id for that resting sell in live mode. */
   tpOrderId: string | null;
   openedAt: number;
+  /** A live closing sell is in flight; nothing else may send a second one. */
+  exiting?: boolean;
+  /**
+   * Deduplication key for this position's closing sell, minted once and reused
+   * by every attempt. A sell whose answer was lost may still have executed, so
+   * a retry has to be the *same* order to Kalshi rather than another one —
+   * without it, re-sending is how one exit becomes an accidental short.
+   */
+  exitClientOrderId?: string | null;
+  /** Closing sells attempted so far; capped by MAX_EXIT_ATTEMPTS. */
+  exitAttempts?: number;
 }
 
 /** One tracked observation of a market: what the scanner remembers per scan. */
@@ -255,6 +267,13 @@ export class TradingEngine {
   private static readonly LOOKBACK = 3; // samples back for momentum
   private static readonly MAX_HISTORY = 20;
   private static readonly MAX_SIGNALS = 60;
+  /**
+   * Closing sells tried before the engine stops and hands the position back to
+   * the user. Each attempt reuses one client_order_id, so re-sending cannot
+   * double-sell; the cap exists because a market that keeps refusing the sell
+   * is a situation retrying will not fix.
+   */
+  private static readonly MAX_EXIT_ATTEMPTS = 3;
   /**
    * Scans a market must be watched before the regime filter will judge it —
    * lag1Autocorrelation needs eight changes, so nine prices. With the filter
@@ -1204,25 +1223,11 @@ export class TradingEngine {
       return;
     }
 
-    if (this.isLive) {
-      this.trackLiveOp(
-        this.client
-          .placeOrder({
-            ticker: m.ticker,
-            side: "yes",
-            action: "buy",
-            count: contracts,
-            buyMaxCostCents: m.yes_ask * contracts,
-          })
-          .catch((e) => this.log("error", `Live order failed for ${m.ticker}: ${e.message}`)),
-      );
-    }
-
     // Taker fee on the way in. Charged to cash immediately, the way Kalshi
     // does, so paper trading reports the same number live trading would.
     const entryFeeUsd = takerFeeUsd(contracts, m.yes_ask);
     this.cashUsd -= costUsd + entryFeeUsd;
-    this.positions.push({
+    const opened: Position = {
       ticker: m.ticker,
       title: m.title,
       side: "yes",
@@ -1241,8 +1246,32 @@ export class TradingEngine {
       tpRestingCents: null,
       tpOrderId: null,
       openedAt: this.now(),
-    });
-    this.restTakeProfit(this.positions[this.positions.length - 1]);
+    };
+    this.positions.push(opened);
+
+    if (this.isLive) {
+      this.trackLiveOp(
+        this.client
+          .placeOrder({
+            ticker: m.ticker,
+            side: "yes",
+            action: "buy",
+            count: contracts,
+            buyMaxCostCents: m.yes_ask * contracts,
+          })
+          // A refused buy used to be logged and nothing else, leaving the
+          // ledger holding a position the exchange never opened: cash spent,
+          // a take-profit resting to sell contracts nobody owns, and every
+          // risk brake measuring a trade that does not exist. The maker path
+          // has always unwound its rejections — this is the same discipline
+          // on the taker side.
+          .catch((e) =>
+            this.abandonPosition(opened, `Kalshi refused the order: ${(e as Error).message}`),
+          ),
+      );
+    }
+
+    this.restTakeProfit(opened);
     this.log(
       "trade",
       `OPEN ${m.ticker} — ${contracts}x YES @ ${m.yes_ask}c ` +
@@ -1436,6 +1465,46 @@ export class TradingEngine {
     });
   }
 
+  /**
+   * Removes a position the exchange never actually opened.
+   *
+   * Not an exit: nothing was bought, so nothing is sold and nothing is booked
+   * to history. The entry cost and fee go back to cash and the position leaves
+   * the ledger, which is the only honest answer when the buy was refused —
+   * recording it as a closed trade would put a fictional round-trip into the
+   * record the risk brakes read from.
+   */
+  private abandonPosition(p: Position, why: string): void {
+    if (!this.positions.includes(p)) return; // already gone: exited, or unwound
+    this.positions = this.positions.filter((x) => x !== p);
+    this.cashUsd += (p.entryCents * p.contracts) / 100 + p.entryFeeUsd;
+
+    // A take-profit may have been rested against a position that turned out
+    // not to exist. It has to die with it, or a live sell sits at the exchange
+    // waiting to short contracts nobody owns.
+    if (this.isLive && p.tpOrderId) {
+      this.trackLiveOp(
+        this.client.cancelOrder(p.tpOrderId).catch((e) => {
+          this.log(
+            "warn",
+            `Could not cancel the take-profit left by the refused entry on ${p.ticker}: ` +
+              `${(e as Error).message}. Check your Kalshi orders page.`,
+          );
+        }),
+      );
+    }
+    p.tpRestingCents = null;
+    p.tpOrderId = null;
+
+    this.log("error", `VOID ${p.ticker} — ${p.contracts}x never opened: ${why}`);
+    this.emitEvent({
+      kind: "closed",
+      tone: "bad",
+      title: `Entry refused · ${p.ticker}`,
+      body: `${why} — the position was removed and the money returned.`,
+    });
+  }
+
   /** Removes a resting order, returns its reserved cash, and kills the real order. */
   private cancelPending(o: PendingOrder, why: string): void {
     if (!this.pendingOrders.includes(o)) return;
@@ -1597,14 +1666,83 @@ export class TradingEngine {
     p.tpRestingCents = null;
     p.tpOrderId = null;
 
-    if (this.isLive) {
-      this.trackLiveOp(
-        this.client
-          .placeOrder({ ticker: p.ticker, side: "yes", action: "sell", count: p.contracts })
-          .catch((e) => this.log("error", `Live sell failed for ${p.ticker}: ${e.message}`)),
-      );
+    if (!this.isLive) {
+      this.bookExit(p, p.currentBidCents, takerFeeUsd(p.contracts, p.currentBidCents), reason, true);
+      return;
     }
-    this.bookExit(p, p.currentBidCents, takerFeeUsd(p.contracts, p.currentBidCents), reason, true);
+
+    if (p.exiting) return; // an attempt is already in flight
+    if ((p.exitAttempts ?? 0) >= TradingEngine.MAX_EXIT_ATTEMPTS) return; // given up; halted below
+
+    // Booking the exit before knowing the sell was accepted is how a real
+    // position becomes an invisible one: history records the trade closed,
+    // the ledger drops it, and the contracts sit at Kalshi with no stop-loss,
+    // no take-profit and nothing watching them. The exit is booked in the
+    // success path only; a failure leaves the position where it is so the
+    // next scan sees the same exit condition and tries again.
+    p.exiting = true;
+    p.exitAttempts = (p.exitAttempts ?? 0) + 1;
+    p.exitClientOrderId ??= crypto.randomUUID();
+    const exitCents = p.currentBidCents;
+
+    this.trackLiveOp(
+      this.client
+        .placeOrder({
+          ticker: p.ticker,
+          side: "yes",
+          action: "sell",
+          count: p.contracts,
+          clientOrderId: p.exitClientOrderId,
+        })
+        .then(() => this.settleExit(p, exitCents, reason))
+        .catch((e) => {
+          // 409 means Kalshi already has this exact order — an earlier attempt
+          // did land and only its answer went missing. That is a filled exit,
+          // not a failed one.
+          if (e instanceof KalshiApiError && e.isDuplicate) {
+            this.settleExit(p, exitCents, reason);
+            return;
+          }
+          p.exiting = false;
+          this.log(
+            "error",
+            `Live sell failed for ${p.ticker} (attempt ${p.exitAttempts}): ${(e as Error).message}`,
+          );
+          if ((p.exitAttempts ?? 0) >= TradingEngine.MAX_EXIT_ATTEMPTS) {
+            this.abandonExit(p, (e as Error).message);
+          }
+        }),
+    );
+  }
+
+  /** The closing sell was accepted: now the exit is real and can be booked. */
+  private settleExit(p: Position, exitCents: number, reason: string): void {
+    if (!this.positions.includes(p)) return; // already resolved elsewhere
+    p.exiting = false;
+    this.bookExit(p, exitCents, takerFeeUsd(p.contracts, exitCents), reason, true);
+  }
+
+  /**
+   * Stops trying to sell a position that will not close, and stops the engine.
+   *
+   * The position stays in the ledger because it is genuinely still open — the
+   * one thing that must not happen here is quietly booking an exit that never
+   * occurred. A live position the app cannot close is exactly the situation a
+   * person needs to know about while it is still happening.
+   */
+  private abandonExit(p: Position, why: string): void {
+    this.haltedReason =
+      `Could not close ${p.ticker} after ${TradingEngine.MAX_EXIT_ATTEMPTS} attempts (${why}). ` +
+      `The position is still open at Kalshi and this app has stopped trying — close it on the ` +
+      `Kalshi site, then press Resume.`;
+    this.log("error", this.haltedReason);
+    this.emitEvent({
+      kind: "halted",
+      tone: "bad",
+      title: "ROM Trader could not close a position",
+      body: `${p.ticker} is still open at Kalshi. Close it there.`,
+    });
+    this.stop();
   }
 
   /**

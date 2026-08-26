@@ -20,6 +20,30 @@ const RETRY_BASE_MS = 400;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * An HTTP error from Kalshi, with the status kept rather than only formatted
+ * into the message.
+ *
+ * 409 is the one the engine has to act on: Kalshi returns it when an order
+ * with that `client_order_id` already exists, which on a retry means the first
+ * attempt landed. Told apart from a real rejection it is a success; parsed out
+ * of a message string it is a substring match waiting to be wrong.
+ */
+export class KalshiApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "KalshiApiError";
+  }
+
+  /** The order already exists at Kalshi — this submission was a duplicate. */
+  get isDuplicate(): boolean {
+    return this.status === 409;
+  }
+}
+
 /** Retry-After is seconds or an HTTP date; fall back to exponential backoff. */
 function retryDelayMs(res: Response, attempt: number): number {
   const header = res.headers.get("retry-after");
@@ -159,7 +183,10 @@ export class KalshiClient {
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(`Kalshi ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`);
+        throw new KalshiApiError(
+          `Kalshi ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`,
+          res.status,
+        );
       }
       return (await res.json()) as T;
     }
@@ -288,17 +315,27 @@ export class KalshiClient {
     }
   }
 
-  /** Auth: place a market order. Used only in live mode. */
+  /**
+   * Auth: place a market order. Used only in live mode.
+   *
+   * `clientOrderId` is Kalshi's deduplication key: submitting the same one
+   * twice is refused with a 409 instead of opening a second position. A caller
+   * that may have to re-send an order — because the first attempt's answer was
+   * lost rather than refused — must mint the id once for the *intent* and pass
+   * the same one every attempt. Left out, each call gets a fresh id, which is
+   * right for a one-shot order and useless for a retry.
+   */
   async placeOrder(params: {
     ticker: string;
     side: "yes" | "no";
     action: "buy" | "sell";
     count: number;
     buyMaxCostCents?: number;
+    clientOrderId?: string;
   }): Promise<unknown> {
     const body: Record<string, unknown> = {
       ticker: params.ticker,
-      client_order_id: crypto.randomUUID(),
+      client_order_id: params.clientOrderId ?? crypto.randomUUID(),
       side: params.side,
       action: params.action,
       count: params.count,
@@ -318,7 +355,12 @@ export class KalshiClient {
    * an order that fills instantly at the ask has quietly become the thing it
    * was meant to avoid.
    */
-  async placeLimitBuy(ticker: string, count: number, yesPriceCents: number): Promise<string> {
+  async placeLimitBuy(
+    ticker: string,
+    count: number,
+    yesPriceCents: number,
+    clientOrderId?: string,
+  ): Promise<string> {
     const data = await this.request<{ order?: { order_id?: string } }>(
       "POST",
       "/portfolio/orders",
@@ -326,7 +368,7 @@ export class KalshiClient {
         auth: true,
         body: {
           ticker,
-          client_order_id: crypto.randomUUID(),
+          client_order_id: clientOrderId ?? crypto.randomUUID(),
           side: "yes",
           action: "buy",
           count,
@@ -348,7 +390,12 @@ export class KalshiClient {
    * an exit that crosses the book has become the taker fee it existed to
    * avoid, and the caller would rather fall back to its market exit.
    */
-  async placeLimitSell(ticker: string, count: number, yesPriceCents: number): Promise<string> {
+  async placeLimitSell(
+    ticker: string,
+    count: number,
+    yesPriceCents: number,
+    clientOrderId?: string,
+  ): Promise<string> {
     const data = await this.request<{ order?: { order_id?: string } }>(
       "POST",
       "/portfolio/orders",
@@ -356,7 +403,7 @@ export class KalshiClient {
         auth: true,
         body: {
           ticker,
-          client_order_id: crypto.randomUUID(),
+          client_order_id: clientOrderId ?? crypto.randomUUID(),
           side: "yes",
           action: "sell",
           count,
