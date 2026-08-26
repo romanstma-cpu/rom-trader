@@ -76,25 +76,47 @@ export interface RecordingInfo {
   lastTs: number | null;
 }
 
+/**
+ * Timestamp of the first parseable line walking in from one end.
+ *
+ * Not just `lines[0]` / `lines.at(-1)`: a killed process leaves a torn final
+ * line, which loadRecording is explicitly built to tolerate. Parsing it blind
+ * here threw, and the catch below reported the entire recording as empty — so
+ * the one condition the format is designed to survive was the condition that
+ * made a week of scans disappear from the Backtest page.
+ */
+function edgeTs(lines: string[], from: "start" | "end"): number | null {
+  for (let i = 0; i < lines.length; i++) {
+    const line = from === "start" ? lines[i] : lines[lines.length - 1 - i];
+    try {
+      const s = JSON.parse(line) as RecordedScan;
+      if (typeof s.ts === "number" && Number.isFinite(s.ts)) return s.ts;
+    } catch {
+      // torn or partial; keep walking inwards
+    }
+  }
+  return null;
+}
+
 export function recordingInfo(): RecordingInfo {
   const p = file();
   if (!fs.existsSync(p)) {
     return { exists: false, scans: 0, bytes: 0, firstTs: null, lastTs: null };
   }
   try {
-    const raw = fs.readFileSync(p, "utf-8");
-    const lines = raw.split("\n").filter(Boolean);
-    const first = lines.length > 0 ? (JSON.parse(lines[0]) as RecordedScan).ts : null;
-    const last =
-      lines.length > 0 ? (JSON.parse(lines[lines.length - 1]) as RecordedScan).ts : null;
+    const lines = fs.readFileSync(p, "utf-8").split("\n").filter(Boolean);
     return {
       exists: true,
+      // Line count, not a parse of every line: this runs on the main process
+      // for a file that can reach 40MB, and at most the final line is ever bad.
       scans: lines.length,
       bytes: fs.statSync(p).size,
-      firstTs: first,
-      lastTs: last,
+      firstTs: edgeTs(lines, "start"),
+      lastTs: edgeTs(lines, "end"),
     };
   } catch {
+    // The file exists but could not be read at all — a lock, a permissions
+    // change. Report it as present but unmeasured rather than as absent.
     return { exists: true, scans: 0, bytes: 0, firstTs: null, lastTs: null };
   }
 }

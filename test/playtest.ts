@@ -1641,6 +1641,17 @@ check("prices survive the round-trip", loaded[1].markets[0].yes_bid === 41);
 fs.appendFileSync(path.join(dataDir(), "scans.jsonl"), '{"ts":1,"markets":[{"tick', "utf-8");
 check("a torn final line is skipped, not fatal", loadRecording().length === 2);
 
+// ...and it must not poison the *summary* either. recordingInfo parsed the
+// last line to find the end timestamp, so the one condition loadRecording is
+// built to tolerate made the whole recording report as empty — which on the
+// Backtest page disables both buttons and says there is no recording at all.
+const torn = recordingInfo();
+check("a torn final line still reports the recording exists", torn.exists === true);
+check("a torn final line does not zero the scan count", torn.scans > 0, `${torn.scans}`);
+check("the start timestamp survives a torn last line", torn.firstTs !== null);
+check("the end timestamp falls back to the last good line", torn.lastTs !== null);
+check("a torn final line still reports a size", torn.bytes > 0, `${torn.bytes}`);
+
 clearRecording();
 check("clearing removes the recording", recordingInfo().exists === false);
 
