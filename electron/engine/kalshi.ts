@@ -3,6 +3,35 @@ import * as crypto from "node:crypto";
 const API_HOST = "https://api.elections.kalshi.com";
 const API_BASE = "/trade-api/v2";
 
+/**
+ * Node's fetch has no default timeout. A socket that connects and then goes
+ * quiet — a provider stall, a wedged proxy, a laptop that slept mid-flight —
+ * leaves the promise pending forever, and the scan awaiting it never returns.
+ * That matters more here than in most apps: a tick that never finishes is a
+ * tick that stops running stop-losses, take-profits and settlement checks
+ * while real positions are still open. Ten seconds is far longer than a
+ * healthy Kalshi response and far shorter than a stuck one.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/** Reads only. Writes are never retried — see `request`. */
+const MAX_READ_RETRIES = 2;
+const RETRY_BASE_MS = 400;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry-After is seconds or an HTTP date; fall back to exponential backoff. */
+function retryDelayMs(res: Response, attempt: number): number {
+  const header = res.headers.get("retry-after");
+  if (header) {
+    const secs = Number(header);
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 15_000);
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) return Math.min(Math.max(at - Date.now(), 0), 15_000);
+  }
+  return RETRY_BASE_MS * 2 ** attempt;
+}
+
 export interface KalshiMarket {
   ticker: string;
   title: string;
@@ -48,6 +77,8 @@ export class KalshiClient {
   constructor(
     private apiKeyId: string = "",
     private privateKeyPem: string = "",
+    /** Overridable so the suite can assert the timeout without waiting for it. */
+    private timeoutMs: number = REQUEST_TIMEOUT_MS,
   ) {}
 
   get hasAuth(): boolean {
@@ -71,27 +102,69 @@ export class KalshiClient {
     };
   }
 
+  /**
+   * One API call, with a hard timeout and — for reads only — bounded retry.
+   *
+   * Only GETs are retried. A POST here places or cancels an order, and a
+   * request that timed out may still have been executed at the exchange: the
+   * silence is ambiguous, not a failure. Retrying it risks a second live
+   * position, which is a far worse outcome than surfacing the error and
+   * letting the next scan reconcile from actual exchange state.
+   */
   private async request<T>(
     method: string,
     path: string,
     opts: { auth?: boolean; body?: unknown } = {},
   ): Promise<T> {
     const fullPath = API_BASE + path;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    };
-    if (opts.auth) Object.assign(headers, this.sign(method, fullPath));
-    const res = await fetch(API_HOST + fullPath, {
-      method,
-      headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Kalshi ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`);
+    const retries = method === "GET" ? MAX_READ_RETRIES : 0;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      // Re-sign every attempt: the signature covers a timestamp that Kalshi
+      // rejects once stale, so a replayed header would fail auth on retry.
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (opts.auth) Object.assign(headers, this.sign(method, fullPath));
+
+      let res: Response;
+      try {
+        res = await fetch(API_HOST + fullPath, {
+          method,
+          headers,
+          body: opts.body ? JSON.stringify(opts.body) : undefined,
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+      } catch (e) {
+        // Timeout or transport failure. Both are safe to repeat for a read.
+        const err = e as Error;
+        lastError =
+          err.name === "TimeoutError" || err.name === "AbortError"
+            ? new Error(`Kalshi ${method} ${path} timed out after ${this.timeoutMs}ms`)
+            : new Error(`Kalshi ${method} ${path} failed: ${err.message}`);
+        if (attempt < retries) {
+          await sleep(RETRY_BASE_MS * 2 ** attempt);
+          continue;
+        }
+        throw lastError;
+      }
+
+      // Rate limiting and server faults are transient by definition.
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(retryDelayMs(res, attempt));
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`Kalshi ${method} ${path} -> ${res.status}: ${text.slice(0, 200)}`);
+      }
+      return (await res.json()) as T;
     }
-    return (await res.json()) as T;
+
+    throw lastError ?? new Error(`Kalshi ${method} ${path} failed`);
   }
 
   /**

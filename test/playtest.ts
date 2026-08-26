@@ -9,9 +9,11 @@
  *     --alias:electron=./test/electron-stub.js --outfile=test/playtest.js
  *   node test/playtest.js
  */
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TradingEngine } from "../electron/engine/engine";
+import { KalshiClient } from "../electron/engine/kalshi";
 import { STRATEGIES, findStrategy } from "../electron/engine/strategies";
 import {
   DEFAULT_SETTINGS,
@@ -2184,6 +2186,107 @@ void (async () => {
     live.positions = [];
     live.attachTpOrderId(gone, "late-tp");
     check("a late take-profit id for a gone position is cancelled", cancelled.includes("late-tp"));
+  }
+
+  // ------------------------------------------------- api client resilience
+
+  {
+    section("the API client cannot hang forever");
+
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+
+    // A socket that connects and then goes quiet. Only the abort signal ends it.
+    // Count only the URL under test: an engine started in an earlier section
+    // keeps ticking through the stubbed global fetch during the retry sleeps,
+    // and its traffic would otherwise be counted as retries of this request.
+    const hang: typeof globalThis.fetch = (url, init) =>
+      new Promise((_resolve, reject) => {
+        if (String(url).includes("KXHANG")) calls++;
+        init?.signal?.addEventListener("abort", () => {
+          const e = new Error("aborted");
+          e.name = "TimeoutError";
+          reject(e);
+        });
+      });
+
+    try {
+      globalThis.fetch = hang;
+      // 40ms timeout: the same code path as production, without the wait.
+      const client = new KalshiClient("", "", 40);
+      const began = Date.now();
+      let threw = "";
+      try {
+        await client.getMarket("KXHANG");
+      } catch (e) {
+        threw = (e as Error).message;
+      }
+      const elapsed = Date.now() - began;
+
+      check("a hung request rejects instead of pending forever", threw !== "");
+      check("the rejection names the timeout", threw.includes("timed out"));
+      check("it gives up promptly", elapsed < 2000);
+      check(`a read is retried before giving up (3 attempts, saw ${calls})`, calls === 3);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  {
+    section("reads retry, writes never do");
+
+    const realFetch = globalThis.fetch;
+    const seen: string[] = [];
+
+    const json = (body: unknown, status = 200): Response =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+
+    try {
+      // A read that is rate-limited once, then succeeds.
+      let readHits = 0;
+      globalThis.fetch = (async (_u, init) => {
+        seen.push(String(init?.method ?? "GET"));
+        readHits++;
+        if (readHits === 1) return json({ error: "slow down" }, 429);
+        return json({ market: { ticker: "KXOK", title: "ok", status: "open" } });
+      }) as typeof globalThis.fetch;
+
+      const reader = new KalshiClient("", "", 500);
+      const got = await reader.getMarket("KXOK");
+      check("a 429'd read is retried and then succeeds", got.market.ticker === "KXOK");
+      check("the retry actually re-requested", readHits === 2);
+
+      // A write that fails with a server error is NOT retried: a timed-out
+      // order may already be live at the exchange, so repeating it risks a
+      // second position.
+      seen.length = 0;
+      let writeHits = 0;
+      globalThis.fetch = (async (_u, init) => {
+        seen.push(String(init?.method ?? "GET"));
+        writeHits++;
+        return json({ error: "server fell over" }, 500);
+      }) as typeof globalThis.fetch;
+
+      // A real key: signing with an empty PEM throws before any request is
+      // made, which would measure the crypto failure rather than the retry rule.
+      const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      const writer = new KalshiClient("kid", pem, 500);
+      let writeThrew = false;
+      try {
+        await writer.cancelOrder("order-1");
+      } catch {
+        writeThrew = true;
+      }
+      check("a failing write surfaces the error", writeThrew);
+      check(`a write is attempted exactly once (saw ${writeHits})`, writeHits === 1);
+      check("no retry was issued for the write", seen.length === 1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   }
 
   // ---------------------------------------------------------------- result
