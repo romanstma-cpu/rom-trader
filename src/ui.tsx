@@ -1,5 +1,6 @@
 import {
   createContext,
+  Fragment,
   useCallback,
   useContext,
   useEffect,
@@ -9,6 +10,9 @@ import {
   type ReactNode,
 } from "react";
 import type { EquityPoint } from "./types";
+// Shared with the engine rather than reimplemented: the chart and the replay
+// must agree on what counts as a continuous stretch of time.
+import { splitAtGaps, sampledMs } from "../electron/engine/series";
 
 /* ---------------- formatting ---------------- */
 
@@ -256,12 +260,29 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
 
     const px = (t: number) => PAD + ((t - minX) / spanX) * (W - PAD * 2);
     const py = (v: number) => H - PAD - ((v - minY) / spanY) * (H - PAD * 2);
+    // One line per stretch the engine was actually running. Joining across a
+    // pause draws equity through time nobody observed — see series.ts, which
+    // holds the rule and the reasoning and is shared with the replay engine.
+    const segments = splitAtGaps(points).map((run) => {
+      const d = run
+        .map((p, i) => `${i === 0 ? "M" : "L"}${px(p.ts).toFixed(1)},${py(p.equityUsd).toFixed(1)}`)
+        .join(" ");
+      // A lone point has no line; give it a hairline so the stretch is visible
+      // rather than silently dropped.
+      const line =
+        run.length === 1
+          ? `${d} L${(px(run[0].ts) + 0.6).toFixed(1)},${py(run[0].equityUsd).toFixed(1)}`
+          : d;
+      return {
+        line,
+        area: `${line} L${px(run[run.length - 1].ts).toFixed(1)},${H - PAD} L${px(run[0].ts).toFixed(1)},${H - PAD} Z`,
+      };
+    });
 
-    const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${px(p.ts).toFixed(1)},${py(p.equityUsd).toFixed(1)}`).join(" ");
-    const area = `${line} L${px(maxX).toFixed(1)},${H - PAD} L${px(minX).toFixed(1)},${H - PAD} Z`;
     return {
-      line,
-      area,
+      segments,
+      gaps: segments.length - 1,
+      sampledMs: sampledMs(points),
       minY,
       maxY,
       first: ys[0],
@@ -299,15 +320,20 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
             <stop offset="100%" stopColor={up ? "#22c55e" : "#ff4d6d"} stopOpacity="0" />
           </linearGradient>
         </defs>
-        <path d={path.area} fill="url(#eqFill)" />
-        <path
-          d={path.line}
-          fill="none"
-          stroke={up ? "#22c55e" : "#ff4d6d"}
-          strokeWidth="2"
-          vectorEffect="non-scaling-stroke"
-          strokeLinejoin="round"
-        />
+        {path.segments.map((seg, i) => (
+          <Fragment key={i}>
+            <path d={seg.area} fill="url(#eqFill)" />
+            <path
+              d={seg.line}
+              fill="none"
+              stroke={up ? "#22c55e" : "#ff4d6d"}
+              strokeWidth="2"
+              vectorEffect="non-scaling-stroke"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          </Fragment>
+        ))}
       </svg>
       {/* These two slots used to hold the minimum and the maximum. Position
           under a chart implies time, so "$91.31 … $99.67" read as a start and
@@ -322,7 +348,14 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
           <b className={pnlClass(change)}>{signedMoney(change)}</b>
           <small>
             {money(path.last)} now · low {money(path.minY)} · high {money(path.maxY)}
-            {path.spanMs > 0 ? ` · ${duration(path.spanMs)}` : ""}
+            {/* Time the engine was actually running, not the width of the
+                chart. Those differed by a factor of thirteen on the file that
+                prompted the gap fix, and only one of them is a fact about
+                trading. */}
+            {path.sampledMs > 0 ? ` · ${duration(path.sampledMs)} running` : ""}
+            {path.gaps > 0
+              ? ` · ${path.gaps} break${path.gaps === 1 ? "" : "s"} over ${duration(path.spanMs)}`
+              : ""}
           </small>
         </span>
       </div>

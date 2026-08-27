@@ -58,6 +58,7 @@ import {
   takerFeeUsd,
 } from "../electron/engine/fees";
 import { computeMetrics } from "../electron/engine/metrics";
+import { splitAtGaps, sampledMs, CONTINUOUS_GAP_MS } from "../electron/engine/series";
 import { lag1Autocorrelation } from "../electron/engine/engine";
 
 let passed = 0;
@@ -121,6 +122,52 @@ check("disclaimer persists once accepted", loadAppState().disclaimerAccepted ===
 check("passive recording defaults on", loadAppState().passiveRecording === true);
 saveAppState({ ...loadAppState(), passiveRecording: false });
 check("passive recording can be turned off", loadAppState().passiveRecording === false);
+
+// ------------------------------------------------------------- equity series
+
+/**
+ * The equity chart used to join every point with one continuous line. On a
+ * real file that drew a 9.5% profit across a thirty-hour gap the engine spent
+ * switched off — the kind of picture this whole project exists not to draw.
+ */
+section("equity series gaps");
+
+const MIN = 60_000;
+check(
+  "a continuous run is one stretch",
+  splitAtGaps([{ ts: 0 }, { ts: 15_000 }, { ts: 30_000 }]).length === 1,
+);
+check(
+  "an overnight pause splits the line",
+  splitAtGaps([{ ts: 0 }, { ts: 15_000 }, { ts: 30 * 60 * MIN }, { ts: 30 * 60 * MIN + 15_000 }]).length === 2,
+);
+check(
+  "a pause just under the threshold does not split",
+  splitAtGaps([{ ts: 0 }, { ts: 179_000 }]).length === 1,
+);
+check(
+  "a pause just over the threshold does split",
+  splitAtGaps([{ ts: 0 }, { ts: 181_000 }]).length === 2,
+);
+check("an empty series has no stretches", splitAtGaps([]).length === 0);
+check("a single point is one stretch", splitAtGaps([{ ts: 5 }]).length === 1);
+check(
+  "every point survives the split",
+  splitAtGaps([{ ts: 0 }, { ts: 10 * MIN }, { ts: 10 * MIN + 1000 }]).flat().length === 3,
+);
+
+// Time running, not the width of the chart. These differ by a factor of
+// thirteen on the file that prompted the fix, and only one is about trading.
+check(
+  "sampled time ignores the hole",
+  sampledMs([{ ts: 0 }, { ts: 60_000 }, { ts: 30 * 60 * MIN }]) === 60_000 + CONTINUOUS_GAP_MS,
+  `${sampledMs([{ ts: 0 }, { ts: 60_000 }, { ts: 30 * 60 * MIN }])}`,
+);
+check(
+  "an unbroken hour reads as an hour",
+  sampledMs(Array.from({ length: 241 }, (_, i) => ({ ts: i * 15_000 }))) === 60 * MIN,
+);
+check("sampled time of a single point is zero", sampledMs([{ ts: 99 }]) === 0);
 
 // ---------------------------------------------------------------- strategies
 
