@@ -259,7 +259,15 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
 
     const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${px(p.ts).toFixed(1)},${py(p.equityUsd).toFixed(1)}`).join(" ");
     const area = `${line} L${px(maxX).toFixed(1)},${H - PAD} L${px(minX).toFixed(1)},${H - PAD} Z`;
-    return { line, area, minY, maxY, first: ys[0], last: ys[ys.length - 1] };
+    return {
+      line,
+      area,
+      minY,
+      maxY,
+      first: ys[0],
+      last: ys[ys.length - 1],
+      spanMs: maxX - minX,
+    };
   }, [points]);
 
   if (!path) {
@@ -271,10 +279,20 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
   }
 
   const up = path.last >= path.first;
+  const change = path.last - path.first;
 
   return (
     <div className="chart">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Equity over time">
+      {/* preserveAspectRatio was "none", which stretched the 900x190 viewBox to
+          whatever width the card happened to be — so the same drawdown looked
+          twice as steep on a narrow window. A slope that changes with the
+          window is not reporting anything. */}
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label={`Equity over time: ${money(path.first)} to ${money(path.last)}, ${signedMoney(change)}`}
+      >
         <defs>
           <linearGradient id="eqFill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={up ? "#22c55e" : "#ff4d6d"} stopOpacity="0.28" />
@@ -291,9 +309,22 @@ export function EquityChart({ points }: { points: EquityPoint[] }) {
           strokeLinejoin="round"
         />
       </svg>
+      {/* These two slots used to hold the minimum and the maximum. Position
+          under a chart implies time, so "$91.31 … $99.67" read as a start and
+          an end — i.e. up $8 — under a curve that was falling. The chart and
+          its own caption told opposite stories. They are the actual endpoints
+          now, with the change stated rather than left to be inferred. */}
       <div className="chart-axis">
-        <span>{money(path.minY)}</span>
-        <span>{money(path.maxY)}</span>
+        <span>
+          {money(path.first)} <small>start</small>
+        </span>
+        <span className="chart-axis-end">
+          <b className={pnlClass(change)}>{signedMoney(change)}</b>
+          <small>
+            {money(path.last)} now · low {money(path.minY)} · high {money(path.maxY)}
+            {path.spanMs > 0 ? ` · ${duration(path.spanMs)}` : ""}
+          </small>
+        </span>
       </div>
     </div>
   );

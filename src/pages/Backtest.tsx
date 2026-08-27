@@ -2,6 +2,13 @@ import { useEffect, useState } from "react";
 import type { BacktestResult, RecordingInfo, SweepProgress, SweepReport } from "../types";
 import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
 
+/** Mirrors MAX_BYTES in electron/engine/recorder.ts. Kept as a constant here
+ *  rather than imported so the renderer bundle stays free of main-process code;
+ *  if that cap moves, this moves with it. */
+const ROTATE_CAP_BYTES = 40 * 1024 * 1024;
+/** Warn with enough runway left to actually do something about it. */
+const ROTATE_WARN_BYTES = ROTATE_CAP_BYTES * 0.85;
+
 function bytes(n: number): string {
   if (n <= 0) return "0 KB";
   const units = ["B", "KB", "MB", "GB"];
@@ -112,9 +119,25 @@ export default function Backtest() {
           </div>
           <div>
             <span className="k">On disk</span>
-            <span className="v">{bytes(info.bytes)}</span>
+            <span className={`v ${info.bytes >= ROTATE_WARN_BYTES ? "warn" : ""}`}>
+              {bytes(info.bytes)}
+            </span>
           </div>
         </div>
+
+        {/* The recorder halves the file once it passes its cap, dropping the
+            OLDEST scans — which are also the ones a replay needs most, because
+            they are the only part with enough history in front of them. Silent
+            data loss on the one screen whose entire purpose is that data. */}
+        {info.bytes >= ROTATE_WARN_BYTES && (
+          <div className="notice warn" role="status">
+            <div>
+              Close to the {bytes(ROTATE_CAP_BYTES)} cap. Once past it the oldest half of the
+              recording is discarded to make room — {span(info.firstTs, info.lastTs)} would become
+              roughly half that, oldest first. Export or replay what matters before then.
+            </div>
+          </div>
+        )}
 
         {!enough && (
           <div className="notice" role="status">

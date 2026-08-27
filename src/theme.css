@@ -994,10 +994,35 @@ textarea::placeholder {
 .chart-axis {
   display: flex;
   justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--faint);
   margin-top: 4px;
+}
+
+/* The change is the number the eye should land on; everything beside it is
+   context. Coloured by direction, so it agrees with the curve above it. */
+.chart-axis b {
+  font-size: 12px;
+  font-weight: 700;
+  margin-right: 8px;
+}
+
+.chart-axis small {
+  font-size: 10.5px;
+  opacity: 0.85;
+}
+
+.chart-axis-end {
+  text-align: right;
+}
+
+/* A recorded-data figure that is approaching a limit worth acting on. */
+.mini-stats .v.warn,
+.v.warn {
+  color: var(--amber);
 }
 
 /* ============ logs ============ */

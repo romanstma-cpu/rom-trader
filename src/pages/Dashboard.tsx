@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import type { EngineState, EquityPoint } from "../types";
+import type { EngineState, EquityPoint, Settings, TradeRecord } from "../types";
+import { breakEvenWinRate } from "../../electron/engine/fees";
 import { EquityChart, Stat, duration, money, pnlClass, signedMoney } from "../ui";
+
+/** Mid of the default price band — the fee curve is flattest here, so it is the
+ *  fair single point to quote a break-even at before there is history to
+ *  measure a real median entry from. */
+const NOMINAL_ENTRY_CENTS = 48;
 
 export default function Dashboard({
   state,
@@ -11,6 +17,8 @@ export default function Dashboard({
 }) {
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [accountUsd, setAccountUsd] = useState<number | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [history, setHistory] = useState<TradeRecord[]>([]);
 
   const live = state ? state.authConfigured && !state.dryRun : false;
 
@@ -18,6 +26,19 @@ export default function Dashboard({
     const load = () => void window.rom.equity.get().then(setEquity);
     load();
     const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Settings decide the break-even win rate; history gives the expectancy that
+  // has actually been achieved against it. Neither changes fast enough to need
+  // the 5s cadence above.
+  useEffect(() => {
+    const load = () => {
+      void window.rom.settings.get().then(setSettings);
+      void window.rom.history.get().then(setHistory);
+    };
+    load();
+    const t = setInterval(load, 20000);
     return () => clearInterval(t);
   }, []);
 
@@ -37,6 +58,24 @@ export default function Dashboard({
   if (!state) return <div className="empty">Loading…</div>;
 
   const running = state.status === "running";
+
+  // The whole question this app exists to answer, in two numbers that used to
+  // live on different screens: what the fees demand, and what is being managed.
+  const need = settings
+    ? breakEvenWinRate(
+        settings.takeProfitCents,
+        settings.stopLossCents,
+        NOMINAL_ENTRY_CENTS,
+        settings.makerEntries,
+      )
+    : null;
+  const gapPts = need !== null && state.winRate !== null ? (state.winRate - need) * 100 : null;
+
+  // Mean P&L per closed trade in the mode being shown, so the headline is not a
+  // paper result quoted at someone trading live, or the reverse.
+  const closed = history.filter((t) => t.dryRun === !live);
+  const expectancy =
+    closed.length > 0 ? closed.reduce((a, t) => a + t.pnlUsd, 0) / closed.length : null;
 
   return (
     <>
@@ -93,18 +132,11 @@ export default function Dashboard({
               : `cash ${money(state.cashUsd)} · paper`
           }
         />
-        <Stat
-          label="Session P&L"
-          value={signedMoney(state.sessionPnlUsd)}
-          tone={pnlClass(state.sessionPnlUsd)}
-          hint="realized + unrealized"
-        />
-        <Stat
-          label="Today"
-          value={signedMoney(state.todayPnlUsd)}
-          tone={pnlClass(state.todayPnlUsd)}
-          hint={`closed ${live ? "live" : "paper"} trades since midnight`}
-        />
+        {/* Session P&L and Today used to sit here as well as in the header bar
+            two inches above, so three of five cards were repeating a number
+            already on screen. The freed slots carry the two figures that
+            appeared nowhere on this page: what the fees demand, and what a
+            trade is actually worth on average. */}
         <Stat
           label="All-Time P&L"
           value={signedMoney(state.allTimePnlUsd)}
@@ -114,10 +146,31 @@ export default function Dashboard({
         <Stat
           label="Win Rate"
           value={state.winRate === null ? "—" : `${(state.winRate * 100).toFixed(0)}%`}
+          tone={gapPts === null ? undefined : gapPts >= 0 ? "pos" : "neg"}
           hint={
-            state.winRate === null
-              ? `no closed ${live ? "live" : "paper"} trades`
-              : `${state.wins + state.losses} ${live ? "live" : "paper"} trades`
+            need === null ? (
+              `${state.wins + state.losses} ${live ? "live" : "paper"} trades`
+            ) : state.winRate === null ? (
+              `need ${(need * 100).toFixed(0)}% to break even at these settings`
+            ) : (
+              <>
+                need <strong>{(need * 100).toFixed(0)}%</strong> to break even ·{" "}
+                <span className={gapPts! >= 0 ? "pos" : "neg"}>
+                  {gapPts! >= 0 ? "+" : ""}
+                  {gapPts!.toFixed(0)}pt {gapPts! >= 0 ? "clear" : "short"}
+                </span>
+              </>
+            )
+          }
+        />
+        <Stat
+          label="Per Trade"
+          value={expectancy === null ? "—" : signedMoney(expectancy)}
+          tone={expectancy === null ? undefined : pnlClass(expectancy)}
+          hint={
+            expectancy === null
+              ? `no closed ${live ? "live" : "paper"} trades yet`
+              : `average over ${closed.length} closed ${live ? "live" : "paper"} trades, after fees`
           }
         />
       </div>
