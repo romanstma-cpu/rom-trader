@@ -200,6 +200,47 @@ export const STRATEGIES: Strategy[] = [
       minMinutesToClose: 30,
     },
   },
+  {
+    id: "feeband",
+    name: "Fee band",
+    tagline: "Trades away from 50c, where the exchange charges the most.",
+    detail:
+      "Kalshi's fee is 0.07 x price x (1 - price) per contract, a hill that peaks at 50c " +
+      "and falls away at both ends. Every other preset here spans that peak. This one buys " +
+      "only between 60c and 75c, rests at the bid, and asks for a 30c move with 20c of room " +
+      "so the fee stops being most of the trade. Replaying 5,538 recorded scans it is the " +
+      "only configuration measured that made money — on 33 trades, which is far too few to " +
+      "call an edge. Paper-trade it and judge for yourself.",
+    risk: "medium",
+    params: {
+      tradeSizeUsd: 8,
+      maxPositions: 4,
+      maxPositionsPerEvent: 1,
+      momentumThresholdCents: 3,
+      takeProfitCents: 30,
+      stopLossCents: 20,
+      tickSeconds: 15,
+      // A maker pays no spread on entry, but a wide book still means the exit
+      // is far from the mark, and the band's edge was measured at 1c.
+      maxSpreadCents: 1,
+      minPriceCents: 60,
+      maxPriceCents: 75,
+      dailyLossLimitUsd: 25,
+      reentryCooldownSeconds: 120,
+      maxConsecutiveLosses: 4,
+      trailingStopCents: 0,
+      makerEntries: true,
+      makerTtlTicks: 6,
+      minNetEdgeCents: 3,
+      regimeFilterEnabled: true,
+      maxDrawdownPct: 15,
+      momentumOnBid: true,
+      requireTradeActivity: true,
+      requireConsistentMove: true,
+      makerExits: false,
+      minMinutesToClose: 30,
+    },
+  },
 ];
 
 export function findStrategy(id: string): Strategy | undefined {

@@ -801,3 +801,153 @@ The History page now carries the exit-reason breakdown and the
 under-two-minute stop count - the first two cuts of every autopsy this
 document has ever run - so the person running the bot sees what the
 analysis sees without exporting a CSV.
+
+# 1.12.0: the fee is a hill, and the bot was standing on top of it
+
+Three days of recorded books — 5,538 scans, 9 contiguous segments, 4,043
+distinct markets, about 27 hours of market time. Everything below comes from
+that one file. Three new scripts do the work and are kept: `edge.ts` asks
+whether the signal predicts anything, `optimize.ts` searches a grid and reports
+what each setting is worth on average, `validate.ts` scores a short list one
+segment at a time.
+
+## First, the number that had to come before any tuning
+
+Replaying the shipped defaults: **143 trades, 45% win rate, profit factor
+0.46, −$131.70**. Every preset loses. The in-app sweep's 144 candidates all
+lose out of sample; its best is −$7.52. That was already known. What was not
+known is *why*, and no amount of parameter search can answer that.
+
+So `edge.ts` measures the thing underneath: from an entry, does the bid reach
+`entry + takeProfit` before `entry − stopLoss`? That barrier race is what the
+win rate is made of, stripped of sizing, brakes, cooldowns and ladder caps.
+89,979 tradeable observations.
+
+The taker's problem turns out to be arithmetic, not prediction. A taker buys at
+the ask and marks at the bid, so the position opens the spread underwater: at a
+3c spread and a 12c barrier it needs 15c up to win and only 9c down to lose,
+before the signal has said anything at all. Break-even on a 12c/12c taker trade
+near 50c is **64.6% of decided races**. The best the trigger reaches is 48.7%.
+
+## What the gates are actually worth
+
+Measured on the same races, each shipped gate in isolation:
+
+| filter | n | mean 10-min bid move | taker YES wins |
+|---|---|---|---|
+| trigger ≥ 4c | 16,072 | −1.61c | 35.5% |
+| + traded volume | 10,913 | −1.00c | 40.7% |
+| + consistent climb | 12,625 | −1.47c | 37.6% |
+| + both gates | 8,870 | −0.99c | 41.6% |
+| + both, spread ≤ 2c | 5,492 | **+0.71c** | 48.7% |
+
+Both gates earn their place, and the spread limit earns more than both of them
+together. It is also the only row in the table where the forward move is
+positive: after the gates, in a tight book, the bid does drift up. **The signal
+is real and it is worth about 0.7c a contract.** A maker pays 1.75c to exit
+near 50c. That is the whole story of every losing backtest this project has
+produced: the edge exists and is roughly 40% of the size of the fee charged to
+collect it.
+
+## The hill nobody had looked at
+
+Kalshi's fee is `0.07 × P × (1 − P)` per contract per side. That is not a
+constant — it is a hill, peaking at 50c and falling away at both ends:
+
+| price | fee per side |
+|---|---|
+| 17c | 0.99c |
+| 33c | 1.54c |
+| 50c | **1.75c** |
+| 67c | 1.54c |
+| 80c | 1.12c |
+
+The shipped price band is 10–85c. It spans the peak and spends most of its
+trades on it. Nothing in the app ever said so; the band read as a taste in
+markets when it is also the largest single lever on what a round trip costs.
+
+So the same races, cut by entry price, each priced against the fee actually
+charged there:
+
+| band | n | fee/side | mean 10-min move | maker wins | needs | margin |
+|---|---|---|---|---|---|---|
+| 10–25c | 602 | 1.02c | +1.33c | 48.1% | 54.3% | −6.2pt |
+| 25–40c | 966 | 1.54c | +0.52c | 49.9% | 56.4% | −6.5pt |
+| 40–60c | 1,423 | 1.75c | +1.52c | 51.8% | 57.3% | −5.5pt |
+| **60–75c** | 1,321 | 1.54c | **+2.67c** | **58.3%** | 56.4% | **+1.9pt** |
+| 75–85c | 1,180 | 1.12c | −2.64c | 57.1% | 54.7% | +2.4pt |
+
+Two bands clear their own break-even. Only one of them clears it honestly.
+75–85c wins more races than it needs to and still drifts down 2.6c, which is
+the signature of a fat left tail: the barrier race scores a −60c collapse and a
+−12c stop identically, and up there the collapses are what pays for the pennies.
+60–75c is positive on both measures at once.
+
+## The grid agreed, afterwards, which is the right order
+
+`optimize.ts` scores each candidate on four consecutive slices of the recording
+and reports the **marginal** for each axis — the average over every candidate
+holding that value while everything else varies. A grid always has a top row
+and the top row of a wide grid is a lottery winner; a marginal is a claim about
+dozens of different companions.
+
+| axis | value | trades | avg per trade |
+|---|---|---|---|
+| price band | 10–85c | 2,084 | −$0.33 |
+| | 25–75c | 1,896 | −$0.41 |
+| | 55–80c | 1,465 | −$0.23 |
+| | **60–75c** | 1,279 | **+$0.17** |
+| take-profit | 12c → 40c | | −$0.38 → −$0.09 |
+| stop-loss | 8c → 30c | | −$0.35 → −$0.17 |
+| max spread | 2c → 1c | | −$0.30 → −$0.15 |
+| maker entries | off → on | | −$0.60 → −$0.47 |
+
+Every axis is monotone. The band is the only one whose sign changes.
+
+Per segment, against the defaults:
+
+| config | total | trades | win | segments up |
+|---|---|---|---|---|
+| shipped defaults | −$131.70 | 143 | 45% | 1 of 9 |
+| Patient preset | −$58.47 | 86 | 38% | 0 of 8 |
+| **60–75c, tp30 sl20, maker** | **+$17.64** | 33 | 58% | 5 of 7 |
+| same rules, band 10–85c | −$2.78 | 41 | 44% | 3 of 8 |
+| same rules, band 75–90c | −$13.19 | 27 | 48% | 2 of 7 |
+| same rules, band 10–40c | −$8.11 | 38 | 39% | 1 of 6 |
+
+The band is doing the work: identical rules outside it lose.
+
+## What that is worth, stated plainly
+
+Thirty-three trades. Twelve of them were still open when the recording ended
+and were marked out rather than closed by a rule. The win rate is 58% where
+43% would break even, but on 21 decided races that gap is about 1.4 standard
+errors — nowhere near significance. One recording, three days, one exchange.
+
+What makes it worth shipping anyway is that it was not found by ranking a grid.
+The fee formula predicted where to look, `edge.ts` measured it on 1,321
+observations, and the grid agreed afterwards across 32 unrelated rule sets. Two
+methods, one mechanism, same answer. That is a hypothesis worth paper-trading,
+and it is offered as exactly that.
+
+## Shipped
+
+- **A "Fee band" preset.** 60–75c, resting at the bid, 30c target with 20c of
+  room, 1c spread limit. Its description says it is the only configuration
+  measured that made money, and that 33 trades is far too few to call an edge.
+- **The fee curve, shown where the band is chosen.** Settings now prints what
+  the round trip costs at the bottom, middle and top of the chosen band, and
+  says outright when the band contains the 50c peak.
+- **A strike column that stops inventing a strike.** A single-outcome market —
+  "ETH price up in next 15 mins?" — carries a `00` placeholder where a ladder
+  carries its strike, and the Signals page was formatting it as a strike of
+  zero: a price the market will never trade at, in the column a trader scans
+  for the line being bet on. Second most common ticker shape in the recording.
+  Those rows now read "open" and their group says "1 market" rather than
+  "1 strike".
+
+## Caveat, standing
+
+The defaults did not change. A preset is an invitation to test something; a
+default is a claim, and 33 trades does not support one. Nothing here has a
+demonstrated forward edge, and the app still opens in dry-run.

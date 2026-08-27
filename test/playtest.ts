@@ -126,10 +126,29 @@ check("passive recording can be turned off", loadAppState().passiveRecording ===
 
 section("strategy presets");
 reset();
-check("four presets ship", STRATEGIES.length === 4, `got ${STRATEGIES.length}`);
+check("five presets ship", STRATEGIES.length === 5, `got ${STRATEGIES.length}`);
 check("ids are unique", new Set(STRATEGIES.map((s) => s.id)).size === STRATEGIES.length);
 check("unknown id is not found", findStrategy("nope") === undefined);
-check("exactly one preset is a maker", STRATEGIES.filter((s) => s.params.makerEntries).length === 1);
+// Maker and taker entries are different trades, not different tunings — the
+// maker pays no spread and no entry fee — so both mechanics must stay
+// represented whatever else changes about the lineup.
+check("both entry mechanics are offered", STRATEGIES.some((s) => s.params.makerEntries) && STRATEGIES.some((s) => !s.params.makerEntries));
+
+// The fee band preset exists because the fee curve peaks at 50c; a band that
+// contained the peak would be the preset arguing against its own reason.
+const feeband = findStrategy("feeband");
+check("fee band preset ships", feeband !== undefined);
+check(
+  "the fee band avoids the 50c fee peak",
+  feeband !== undefined && feeband.params.minPriceCents > 50,
+  feeband ? `min ${feeband.params.minPriceCents}c` : "missing",
+);
+check(
+  "the fee band is cheaper to trade than the middle of the board",
+  feeband !== undefined &&
+    takerFeeCentsPerContract((feeband.params.minPriceCents + feeband.params.maxPriceCents) / 2) <
+      takerFeeCentsPerContract(50),
+);
 
 for (const s of STRATEGIES) {
   // Not "take-profit beats stop", which is the folk rule and is wrong here.

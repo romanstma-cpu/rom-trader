@@ -11,6 +11,52 @@ import {
   takerFeeUsd,
 } from "../../electron/engine/fees";
 
+/**
+ * What the chosen price band costs to trade in.
+ *
+ * Kalshi's fee is 0.07 x P x (1 - P) per contract, which is a hill: it peaks
+ * at 50c and falls away toward both ends. A trade at 50c costs nearly twice
+ * what the same trade costs at 80c, and the app never said so — the price band
+ * read as a taste in markets when it is also the single biggest lever on what
+ * a round trip costs. Replaying 5,538 recorded scans, the band was the only
+ * setting whose average was positive on one side of it and negative on the
+ * other.
+ */
+function BandCost({ min, max, maker }: { min: number; max: number; maker: boolean }) {
+  if (min >= max) return null;
+  const at = (p: number) =>
+    maker ? takerFeeCentsPerContract(p) : roundTripFeeCentsPerContract(p);
+  const mid = Math.round((min + max) / 2);
+  const worst = Math.max(at(min), at(mid), at(max));
+  const best = Math.min(at(min), at(mid), at(max));
+  // 50c is the peak of the curve, so a band that contains it cannot avoid the
+  // most expensive trades on the exchange.
+  const spansPeak = min <= 50 && max >= 50;
+
+  return (
+    <div className="band-cost">
+      <span className="band-cost-label">
+        {maker ? "Exit fee" : "Round-trip fee"} across this band
+      </span>
+      <span className="band-cost-scale">
+        {[min, mid, max].map((p) => (
+          <span key={p}>
+            <b>{p}c</b> costs {at(p).toFixed(2)}c
+          </span>
+        ))}
+      </span>
+      <span className="band-cost-note">
+        {spansPeak
+          ? `The fee peaks at 50c, which this band includes — its dearest trades cost ` +
+            `${worst.toFixed(2)}c a contract against ${best.toFixed(2)}c at the edge. ` +
+            `Every cent of that comes out of the take-profit before you keep any of it.`
+          : `Away from the 50c peak, so the fee here runs ${best.toFixed(2)}–${worst.toFixed(2)}c ` +
+            `a contract rather than the 1.75c the middle of the board charges.`}
+      </span>
+    </div>
+  );
+}
+
 /** Field names as they read on screen, for the empty-box warning. */
 const FIELD_LABELS: Partial<Record<keyof Settings, string>> = {
   tradeSizeUsd: "Trade size",
@@ -499,6 +545,7 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
             onChange={(v) => update({ minMinutesToClose: v })}
           />
         </div>
+        <BandCost min={settings.minPriceCents} max={settings.maxPriceCents} maker={maker} />
         <Toggle
           label="Skip mean-reverting markets (regime filter)"
           help="Momentum assumes the last move predicts the next one. This checks whether a market's recent moves have actually been continuing, and skips it while they have been reversing instead."

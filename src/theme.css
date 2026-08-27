@@ -1321,3 +1321,43 @@ textarea::placeholder {
   margin-bottom: 22px;
   text-align: left;
 }
+
+/* The fee curve, made visible where the price band is chosen. Kalshi charges
+   0.07 x P x (1 - P) per contract, so where in the band you trade is a cost
+   decision as much as a market-selection one. */
+.band-cost {
+  display: grid;
+  gap: 7px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.band-cost-label {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.band-cost-scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.band-cost-scale b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.band-cost-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 76ch;
+}

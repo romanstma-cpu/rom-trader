@@ -20,11 +20,32 @@ function splitTicker(ticker: string): { event: string; strike: string } {
   return { event: ticker.slice(0, i), strike: ticker.slice(i + 1) };
 }
 
-/** T78899.99 -> "T 78,899.99". The prefix is Kalshi's, so it is shown rather
- *  than translated into a claim about what the strike means. */
-function formatStrike(strike: string): string {
+/**
+ * A market with only one outcome carries a `00` placeholder where a ladder
+ * carries its strike: KXETH15M-26AUG240600-00 is "ETH price up in next 15
+ * mins?", which has no strike at all. Formatted as a number that read as a
+ * strike of zero — a price this market will never trade at, sitting in the
+ * column a trader scans for the line being bet on. Second most common ticker
+ * shape in the recording, so it is not a corner case.
+ */
+function isPlaceholder(strike: string): boolean {
+  return strike === "" || /^0+$/.test(strike);
+}
+
+/**
+ * T78899.99 -> "T 78,899.99". The prefix is Kalshi's, so it is shown rather
+ * than translated into a claim about what the strike means.
+ *
+ * Returns null when the segment is not a strike. Plenty are not: match markets
+ * end in a team code (NEG, KUA, TIE) and "highest return this week" markets end
+ * in a ticker symbol (BTC, ETH). Those are passed through untouched — they are
+ * the one thing that distinguishes sibling rows, which is exactly what this
+ * column is for.
+ */
+function formatStrike(strike: string): string | null {
+  if (isPlaceholder(strike)) return null;
   const m = strike.match(/^([A-Za-z]*)([\d.]+)$/);
-  if (!m) return strike || "—";
+  if (!m) return strike;
   const n = Number(m[2]);
   if (!Number.isFinite(n)) return strike;
   const num = n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -34,6 +55,7 @@ function formatStrike(strike: string): string {
 /** Numeric where possible, so strikes ladder in order rather than lexically —
  *  otherwise 79099.99 sorts above 78899.99 because "9" precedes "8". */
 function strikeValue(strike: string): number {
+  if (isPlaceholder(strike)) return Number.POSITIVE_INFINITY;
   const m = strike.match(/[\d.]+/);
   const n = m ? Number(m[0]) : NaN;
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
@@ -46,6 +68,8 @@ interface Group {
   qualified: number;
   /** Best position in the incoming order, which is already strongest-first. */
   rank: number;
+  /** How many rows actually carry a strike — a one-outcome market has none. */
+  strikes: number;
 }
 
 export default function Signals({ running, idleHint }: { running: boolean; idleHint: string | null }) {
@@ -76,14 +100,15 @@ export default function Signals({ running, idleHint }: { running: boolean; idleH
   const groups = useMemo(() => {
     const by = new Map<string, Group>();
     shown.forEach((s, i) => {
-      const { event } = splitTicker(s.ticker);
+      const { event, strike } = splitTicker(s.ticker);
       let g = by.get(event);
       if (!g) {
-        g = { event, title: s.title, rows: [], qualified: 0, rank: i };
+        g = { event, title: s.title, rows: [], qualified: 0, rank: i, strikes: 0 };
         by.set(event, g);
       }
       g.rows.push(s);
       if (s.eligible) g.qualified++;
+      if (!isPlaceholder(strike)) g.strikes++;
     });
     const out = [...by.values()];
     // Events keep the order the engine sent — strongest mover first — and the
@@ -156,7 +181,11 @@ export default function Signals({ running, idleHint }: { running: boolean; idleH
                   <td colSpan={anyMomentum ? 5 : 4}>
                     <span className="group-title">{g.title}</span>
                     <span className="group-meta">
-                      {g.event} · {g.rows.length} strike{g.rows.length === 1 ? "" : "s"} ·{" "}
+                      {g.event} · {g.rows.length}{" "}
+                      {g.strikes > 0
+                        ? `strike${g.rows.length === 1 ? "" : "s"}`
+                        : `market${g.rows.length === 1 ? "" : "s"}`}{" "}
+                      ·{" "}
                       {g.qualified > 0 ? (
                         <span className="pos">{g.qualified} qualified</span>
                       ) : (
@@ -166,16 +195,16 @@ export default function Signals({ running, idleHint }: { running: boolean; idleH
                   </td>
                 </tr>
                 {g.rows.map((s) => {
-                  const { strike } = splitTicker(s.ticker);
+                  const label = formatStrike(splitTicker(s.ticker).strike);
                   return (
                     <tr key={s.ticker} className={s.eligible ? "row-hot" : ""}>
                       <td>
                         <button
-                          className="linkish strike"
+                          className={`linkish strike${label === null ? " muted" : ""}`}
                           onClick={() => open(s.ticker)}
                           title={`Open ${s.ticker} on Kalshi`}
                         >
-                          {formatStrike(strike)} ↗
+                          {label ?? "open"} ↗
                         </button>
                       </td>
                       <td>

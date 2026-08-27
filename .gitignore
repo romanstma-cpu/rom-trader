@@ -13,6 +13,9 @@ test/tray-check.js
 scripts/simulate.js
 scripts/record.js
 scripts/replay.js
+scripts/edge.js
+scripts/optimize.js
+scripts/validate.js
 
 # local editor / OS noise
 .vscode/
