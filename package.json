@@ -1,7 +1,7 @@
 {
   "name": "rom-trader",
   "productName": "ROM Trader",
-  "version": "1.11.1",
+  "version": "1.11.2",
   "description": "A simple Kalshi auto-trading bot. Momentum engine, live dashboard, trade history.",
   "main": "dist-electron/main.js",
   "license": "MIT",
