@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import type { BacktestResult, RecordingInfo, SweepProgress, SweepReport } from "../types";
 import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
 
+/** Mirrors prepareSweep in electron/engine/sweep.ts: the newest MAX_SWEEP_SCANS
+ *  are used, split 60/40 by time. Duplicated rather than imported so the
+ *  renderer bundle stays free of main-process code — if the split moves there,
+ *  it moves here. */
+const MAX_SWEEP_SCANS = 6000;
+const TRAIN_FRACTION = 0.6;
+/** Candidates in the grid: 4 take-profits x 3 stops x 3 momentum x 2 spreads x
+ *  maker on/off, plus the current settings as a baseline. */
+const GRID_SIZE = 4 * 3 * 3 * 2 * 2;
+
 /** Mirrors MAX_BYTES in electron/engine/recorder.ts. Kept as a constant here
  *  rather than imported so the renderer bundle stays free of main-process code;
  *  if that cap moves, this moves with it. */
@@ -86,6 +96,11 @@ export default function Backtest() {
   if (!info) return <div className="empty">Loading…</div>;
 
   const enough = info.scans >= 10;
+  // What a sweep would actually use, so the preview quotes this recording
+  // rather than a generic description of the feature.
+  const sweepScans = Math.min(info.scans, MAX_SWEEP_SCANS);
+  const trainScans = Math.floor(sweepScans * TRAIN_FRACTION);
+  const testScans = sweepScans - trainScans;
   // Deliberately no "winner" highlight. One recording cannot establish an edge,
   // and crowning a row would quietly invite tuning until this table looks good
   // — which is how a backtest turns into a way of fooling yourself.
@@ -172,6 +187,45 @@ export default function Backtest() {
               className="progress-fill"
               style={{ width: `${(sweepProgress.done / sweepProgress.total) * 100}%` }}
             />
+          </div>
+        )}
+
+        {/* Before this, the page was three numbers, two buttons and most of a
+            screen of nothing — on the one feature that can actually answer
+            whether any of these settings work. Nobody presses a button when
+            they cannot picture the output, so say what each one produces, in
+            the units of the recording actually on disk. */}
+        {!results && !sweep && !running && !sweeping && info.scans > 0 && (
+          <div className="preview">
+            <div className="preview-col">
+              <div className="preview-head">Compare strategies</div>
+              <p>
+                Replays your current settings and every shipped preset over the same{" "}
+                <strong>{info.scans.toLocaleString()}</strong> scans, using the code that trades
+                live. You get one row per preset: P&amp;L, trades taken, win rate, and the biggest
+                drawdown it sat through.
+              </p>
+              <p className="preview-note">
+                {enough
+                  ? `Ready — ${span(info.firstTs, info.lastTs)} of market on disk.`
+                  : `Needs ${10 - info.scans} more scan${10 - info.scans === 1 ? "" : "s"}.`}
+              </p>
+            </div>
+            <div className="preview-col">
+              <div className="preview-head">Parameter sweep</div>
+              <p>
+                Scores {GRID_SIZE} setting combinations, fitted on the first{" "}
+                <strong>{trainScans.toLocaleString()}</strong> scans and marked on the{" "}
+                <strong>{testScans.toLocaleString()}</strong> held back. Ranked by the held-out
+                result, never the training one — a winner that only wins on data it was fitted to
+                is the failure this page exists to catch.
+              </p>
+              <p className="preview-note">
+                {info.scans >= 60
+                  ? "Ready — takes a minute or so."
+                  : `Needs ${60 - info.scans} more scan${60 - info.scans === 1 ? "" : "s"}.`}
+              </p>
+            </div>
           </div>
         )}
       </div>

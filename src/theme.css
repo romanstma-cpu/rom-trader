@@ -658,6 +658,81 @@ body {
   font-size: 10.5px;
   letter-spacing: 0.6px;
 }
+
+/* One header per event ladder. The eight sibling strikes underneath used to
+   repeat a 24-character ticker and an identical subtitle on every row; the
+   thing that actually differs between them is now the first column. */
+.group-head td {
+  padding-top: 18px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+}
+
+tbody tr.group-head:first-child td {
+  padding-top: 10px;
+}
+
+.group-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.group-meta {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+/* What a replay will give you, shown while there is nothing to show. */
+.preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 860px) {
+  .preview { grid-template-columns: 1fr; }
+}
+
+.preview-col p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.preview-head {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+
+.preview-col strong { color: var(--text); font-weight: 600; }
+
+.preview-note {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint) !important;
+}
+
+/* Tabular figures so a ladder of strikes lines up on the decimal point. */
+.linkish.strike {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 .verdict.yes {
   color: var(--green);
 }
