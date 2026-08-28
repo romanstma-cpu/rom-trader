@@ -13,6 +13,16 @@ import { Narrate, timeAgo, useToast } from "../ui";
  * subtitle that was identical too. Eight strikes of one Bitcoin ladder read as
  * eight indistinguishable rows on the screen the site calls "the bot showing
  * its work".
+ *
+ * The `event` half must stay identical to `skill.eventOf`, because the groups
+ * drawn here are the ladders `maxPositionsPerEvent` and the loss lockout act
+ * on — a group heading that says "5 markets · 2 qualified" is a claim about
+ * which rows compete for one slot. Kept as its own function rather than
+ * imported because the renderer does not reach into `electron/`, and because
+ * this one needs the outcome half too. The engine's copy is what drifted:
+ * it read the event out of a `-T…`/`-B…` strike suffix until recently, so
+ * this page grouped five KXCRYPTOLEAD15M outcomes under one heading while the
+ * engine happily held positions in several of them. The page was right.
  */
 function splitTicker(ticker: string): { event: string; strike: string } {
   const i = ticker.lastIndexOf("-");
