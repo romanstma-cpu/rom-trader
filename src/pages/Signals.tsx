@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Signal } from "../types";
-import { timeAgo, useToast } from "../ui";
+import { Narrate, timeAgo, useToast } from "../ui";
 
 /**
  * A Kalshi market ticker is SERIES-EVENTCODE-STRIKE, e.g.
@@ -72,6 +72,62 @@ interface Group {
   strikes: number;
 }
 
+/**
+ * What the last sweep actually decided, in one paragraph.
+ *
+ * The table below it is complete and, at forty rows across a dozen refusal
+ * reasons, answers "why is nothing trading" only to someone willing to count.
+ * That is the question this page exists for, so it gets answered in words —
+ * computed from the same rows, and phrased to name the ONE gate doing most of
+ * the work rather than listing all of them evenly.
+ */
+function summariseScan(signals: Signal[]): { summary: string; evidence: { label: string; value: string }[] } {
+  const total = signals.length;
+  const eligible = signals.filter((s) => s.eligible);
+  const refused = signals.filter((s) => !s.eligible);
+
+  // Reasons carry per-market numbers ("spread 7c > 2c limit"), so they are
+  // grouped on a digit-blind key — but the KEY is never shown. Blanking the
+  // digits produces "price Nc outside NNc band", which is unreadable; a real
+  // example from the group says the same thing and can be checked against the
+  // table below.
+  const byReason = new Map<string, { count: number; example: string }>();
+  for (const s of refused) {
+    const key = s.reason.replace(/-?\d+(\.\d+)?/g, "#").trim();
+    const seen = byReason.get(key);
+    if (seen) seen.count++;
+    else byReason.set(key, { count: 1, example: s.reason });
+  }
+  const ranked = [...byReason.values()].sort((a, b) => b.count - a.count);
+  const spreads = signals.map((s) => s.spreadCents).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  const medianSpread = spreads.length ? spreads[Math.floor(spreads.length / 2)] : 0;
+
+  const parts: string[] = [
+    `The last sweep looked at ${total} markets and ${eligible.length} qualified.`,
+  ];
+  if (ranked.length > 0) {
+    const top = ranked[0];
+    const share = Math.round((top.count / Math.max(refused.length, 1)) * 100);
+    parts.push(
+      `The gate doing most of the work was the one behind "${top.example}" — ${top.count} of ${refused.length} rejections, ${share}%.`,
+    );
+  }
+  parts.push(`Median spread across the book was ${medianSpread}c.`);
+  if (eligible.length === 0 && total > 0) {
+    parts.push("Nothing qualified, so the engine will not open a position on this sweep.");
+  }
+
+  return {
+    summary: parts.join(" "),
+    evidence: [
+      { label: "Markets scanned", value: `${total}` },
+      { label: "Qualified", value: `${eligible.length}` },
+      { label: "Median spread", value: `${medianSpread}c` },
+      ...ranked.slice(0, 6).map((r) => ({ label: r.example, value: `${r.count} markets` })),
+    ],
+  };
+}
+
 export default function Signals({ running, idleHint }: { running: boolean; idleHint: string | null }) {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [onlyEligible, setOnlyEligible] = useState(false);
@@ -124,6 +180,12 @@ export default function Signals({ running, idleHint }: { running: boolean; idleH
   // period is teaching the eye to skip a region of the table.
   const anyMomentum = shown.some((s) => s.changeCents !== null);
 
+  // Computed from every signal, not the filtered view — "why is nothing
+  // trading" is a question about the whole sweep, and answering it from a
+  // list the user has narrowed to eligible-only would always say "all of them
+  // qualified".
+  const scan = useMemo(() => summariseScan(signals), [signals]);
+
   if (signals.length === 0) {
     return (
       <div className="empty">
@@ -145,6 +207,13 @@ export default function Signals({ running, idleHint }: { running: boolean; idleH
       </div>
 
       {idleHint && <div className="notice">{idleHint}</div>}
+
+      <Narrate
+        subject="what ROM Trader's last market sweep decided and why"
+        summary={scan.summary}
+        evidence={scan.evidence}
+      />
+
 
       <div className="toolbar">
         <label className="check">

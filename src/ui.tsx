@@ -356,31 +356,50 @@ export function Narrate({
 
   if (!status) return null;
 
+  const label = status.configured
+    ? busy
+      ? "Writing…"
+      : result
+        ? "Rewrite"
+        : "Explain in plain English"
+    : open
+      ? "Cancel"
+      : "Set up AI summaries";
+
   return (
-    <div className="narrate">
+    <div className={`narrate${result?.ok ? " has-text" : ""}`}>
       <div className="narrate-head">
-        <span className="label">In plain English</span>
-        {status.configured ? (
-          <button className="btn quiet tiny" onClick={() => void run()} disabled={busy}>
-            {busy ? "Writing…" : result ? "Rewrite" : "Explain these results"}
-          </button>
-        ) : (
-          <button className="btn quiet tiny" onClick={() => setOpen((v) => !v)}>
-            {open ? "Cancel" : "Set up"}
-          </button>
-        )}
+        <span className="label">
+          {/* The deterministic summary is always the headline; the model only
+              ever adds a second phrasing above it. */}
+          Summary
+        </span>
+        <button
+          className={`btn tiny ${status.configured ? "quiet" : "primary"}`}
+          onClick={() => (status.configured ? void run() : setOpen((v) => !v))}
+          disabled={busy}
+        >
+          {busy && <span className="spinner" aria-hidden="true" />}
+          {label}
+        </button>
       </div>
 
+      {/* The reworded version goes above; the computed one is ALWAYS shown.
+          It was previously rendered only when a model was configured, which
+          quietly made the app less informative without a key than with one —
+          the opposite of the intent, since the computed text is the thing that
+          is actually true. */}
+      {result?.ok && <p className="narrate-text">{result.text}</p>}
+      <p className={result?.ok ? "narrate-source" : "narrate-text"}>{summary}</p>
+
       {result?.ok && (
-        <>
-          <p className="narrate-text">{result.text}</p>
-          <div className="hint">
-            Reworded by {result.model}. Every figure in it was checked against the table above.
-          </div>
-        </>
+        <div className="hint narrate-meta">
+          <span className="tag">reworded</span> by {result.model} — every figure in it was checked
+          against the measured text above.
+        </div>
       )}
       {result && !result.ok && (
-        <div className="hint">Not reworded — {result.reason}. The measured summary stands.</div>
+        <div className="hint narrate-meta">Not reworded — {result.reason}. The measured summary stands.</div>
       )}
 
       {!status.configured && open && (

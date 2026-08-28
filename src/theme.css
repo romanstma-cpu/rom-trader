@@ -402,12 +402,67 @@ body {
 }
 
 /* ============ narration ============
-   Deliberately quiet. This is a rewording of the table above it, not a finding
-   of its own, and giving it the weight of a result would invert the point. */
+   A panel of its own, because the computed summary is now always shown and is
+   often the most useful thing on the page — but it never outranks the table it
+   describes, so no accent border and no gradient. Quiet, not hidden. */
 .narrate {
   margin-top: 14px;
-  border-top: 1px solid var(--border-soft);
-  padding-top: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+/* Once a model has written something there are two paragraphs, so the block
+   earns a little more air. */
+.narrate.has-text {
+  border-color: var(--border);
+}
+
+.narrate-source {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-soft);
+}
+
+.narrate-meta {
+  margin-top: 8px;
+}
+
+.narrate-meta .tag {
+  margin-right: 4px;
+}
+
+/* A spinner rather than only a word change: the request can take a few
+   seconds on a free model and a button that merely relabels itself reads as
+   having done nothing. */
+.spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-right-color: currentColor;
+    opacity: 0.5;
+  }
 }
 
 .narrate-head {
@@ -420,9 +475,9 @@ body {
 
 .narrate-text {
   font-size: 13.5px;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--text);
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
 
 .narrate-setup {
