@@ -122,7 +122,10 @@ export default function History({ onChanged }: { onChanged: () => void }) {
             {stats.wins}W / {stats.losses}L
           </div>
           <div className="hint">
-            {rows.length > 0 ? `${((stats.wins / rows.length) * 100).toFixed(0)}% win rate` : "—"}
+            {rows.length > 0
+              ? `${((stats.wins / rows.length) * 100).toFixed(0)}% win rate · ` +
+                `${metrics.events} ${metrics.events === 1 ? "event" : "events"}`
+              : "—"}
           </div>
         </div>
         <div className="card stat">
@@ -155,7 +158,11 @@ export default function History({ onChanged }: { onChanged: () => void }) {
           <div className={`value ${metrics.expectancyUsd === null ? "" : pnlClass(metrics.expectancyUsd)}`}>
             {metrics.expectancyUsd === null ? "—" : signedMoney(metrics.expectancyUsd)}
           </div>
-          <div className="hint">average result of one trade</div>
+          <div className="hint">
+            {metrics.expectancyCI === null
+              ? "average result of one trade"
+              : `95% CI ${signedMoney(metrics.expectancyCI[0])} to ${signedMoney(metrics.expectancyCI[1])}`}
+          </div>
         </div>
         <div className="card stat">
           <div className="label">Payoff</div>
@@ -174,6 +181,17 @@ export default function History({ onChanged }: { onChanged: () => void }) {
           <div className="hint">longest runs</div>
         </div>
       </div>
+
+      {metrics.events > 0 && metrics.trades >= metrics.events * 2 && (
+        <div className="card">
+          <div className="hint">
+            These {metrics.trades} trades came from {metrics.events} event
+            {metrics.events === 1 ? "" : "s"}. Sibling strikes of one ladder settle on the same
+            move, so they win and lose together — the interval above counts events, not trades,
+            which is why it is wider than {metrics.trades} results would suggest.
+          </div>
+        </div>
+      )}
 
       {byReason.length > 1 && (
         <div className="card">

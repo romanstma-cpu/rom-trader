@@ -23,6 +23,7 @@ import {
 } from "./engine/settlements";
 import { clearTape, keepTrades, nextPollFrom, recordTrades, tapeInfo } from "./engine/tape";
 import { clearSpot, spotInfo, sweepSpot } from "./engine/spot";
+import { clearDepth, depthInfo, sweepDepth } from "./engine/depth";
 import {
   FREE_MODELS,
   aiStatus,
@@ -379,6 +380,40 @@ function startTapeRecorder(): void {
 }
 
 /**
+ * Records what is resting behind the quote.
+ *
+ * Every study so far has read the touch, which says what a trade would cost and
+ * nothing about what is standing there. Depth is the last free input Kalshi
+ * publishes that this app has never stored, and it is the only one that cannot
+ * be backfilled — the tape and the settlements could be fetched for markets
+ * that closed days ago, but a book that has already resolved is gone. So it
+ * starts recording now, before the study that reads it exists.
+ *
+ * Gated on the same setting as the tape and spot: it collects new data rather
+ * than completing data already gathered, so switching recording off must switch
+ * it off too.
+ */
+function startDepthRecorder(): void {
+  const publicClient = new KalshiClient();
+  let polling = false;
+
+  setInterval(() => {
+    if (polling) return;
+    if (!loadAppState().passiveRecording) return;
+    if (recordedUniverse.size === 0) return; // nothing to attach a book to yet
+    polling = true;
+    sweepDepth((t) => publicClient.getOrderbook(t), [...recordedUniverse])
+      .catch(() => {
+        // Offline or rate-limited. Books are a snapshot, not a stream — a
+        // missed poll is a missed moment, not a gap that needs repairing.
+      })
+      .finally(() => {
+        polling = false;
+      });
+  }, 30_000);
+}
+
+/**
  * Records the underlying's price alongside the contract's.
  *
  * The one input every fair-value question needs, and the app has never had it.
@@ -527,6 +562,7 @@ function registerIpc(): void {
   ipcMain.handle("backtest:settlements", () => settlementInfo());
   ipcMain.handle("backtest:tape", () => tapeInfo());
   ipcMain.handle("backtest:spot", () => spotInfo());
+  ipcMain.handle("backtest:depth", () => depthInfo());
 
   // The key is written here and never read back. `ai:status` returns a hint and
   // a flag; there is deliberately no handler that hands the renderer the key,
@@ -574,6 +610,7 @@ function registerIpc(): void {
     clearSettlements();
     clearTape();
     clearSpot();
+    clearDepth();
     return recordingInfo();
   });
 
@@ -685,6 +722,7 @@ if (!app.requestSingleInstanceLock()) {
       startSettlementSweeper();
       startTapeRecorder();
       startSpotRecorder();
+      startDepthRecorder();
       engine.subscribe({
         onState: (s) => {
           sendToRenderer("engine:state", s);

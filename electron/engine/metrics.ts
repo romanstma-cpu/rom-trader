@@ -1,4 +1,5 @@
 import type { EquityPoint, TradeRecord } from "./store";
+import { clusterBootstrapCI, eventOf, groupByEvent } from "./skill";
 
 /**
  * Performance measurement over a set of closed trades.
@@ -12,12 +13,36 @@ import type { EquityPoint, TradeRecord } from "./store";
  * Sharpe and Sortino are per-trade, deliberately not annualised. Annualising
  * assumes a trade frequency this engine does not promise, and multiplying a
  * noisy number by sqrt(252) manufactures confidence out of arithmetic.
+ *
+ * THE TRADE COUNT IS NOT THE SAMPLE SIZE
+ *
+ * This page used to report a win rate and a P&L with no interval and no honest
+ * denominator, which let fifteen trades taken across three BTC ladders read as
+ * fifteen independent results. They are not: sibling strikes of one event
+ * resolve on one underlying move, so a ladder that goes the wrong way produces
+ * a run of losses that is ONE outcome wearing several coats. The scripts in
+ * this repo were rebuilt around that fact after it invalidated a fair-value
+ * result; leaving the app itself reporting the flattering version would be
+ * shipping the error that was just removed from the research.
+ *
+ * So `events` counts distinct event ladders, and both intervals come from an
+ * event-clustered bootstrap. Where the trade count and the event count diverge
+ * sharply, the interval widens to say so.
  */
 export interface PerformanceMetrics {
   trades: number;
+  /**
+   * Distinct event ladders among those trades — the honest denominator.
+   * Sibling strikes settle together, so they are one observation, not several.
+   */
+  events: number;
   wins: number;
   losses: number;
   winRate: number | null;
+  /** Event-clustered 95% interval on the win rate. Null under two trades. */
+  winRateCI: [number, number] | null;
+  /** Event-clustered 95% interval on mean P&L per trade, in dollars. */
+  expectancyCI: [number, number] | null;
   /** Sum of winning trades, in dollars. */
   grossWinUsd: number;
   /** Sum of losing trades as a positive number, in dollars. */
@@ -98,14 +123,59 @@ export function computeMetrics(
     if (lossStreak > bestLossStreak) bestLossStreak = lossStreak;
   }
 
+  // Group by event ladder, not by ticker, so every rung of one BTC hour
+  // collapses to a single unit of evidence.
+  //
+  // Deliberately `skill.eventOf` (split at the last dash) rather than
+  // `TradingEngine.eventOf` (strip a `-T…`/`-B…` strike suffix). The two agree
+  // on the crypto threshold ladders and disagree on series whose outcome
+  // segment is not a strike — KXCRYPTOLEAD15M has up to five siblings per
+  // event that the engine's rule reads as five separate events. For MEASUREMENT
+  // the broader grouping is the correct one: those markets do resolve together,
+  // whatever the risk limits currently believe. The engine's own definition is
+  // a separate question, because widening it changes live behaviour.
+  const groups = groupByEvent(history, (t) => eventOf(t.ticker));
+  const decided = history.filter((t) => t.pnlUsd !== 0);
+  let winRateCI: [number, number] | null = null;
+  let expectancyCI: [number, number] | null = null;
+  if (history.length >= 2) {
+    expectancyCI = clusterBootstrapCI(
+      groups,
+      (idx) => {
+        let s = 0;
+        for (const i of idx) s += pnls[i];
+        return round2(s / idx.length);
+      },
+      2000,
+    );
+  }
+  if (decided.length >= 2) {
+    // A flat trade is not evidence either way, so the win-rate interval is
+    // built on decided trades only — matching how winRate itself is computed.
+    const decidedGroups = groupByEvent(decided, (t) => eventOf(t.ticker));
+    const won = decided.map((t) => (t.pnlUsd > 0 ? 1 : 0));
+    winRateCI = clusterBootstrapCI(
+      decidedGroups,
+      (idx) => {
+        let s = 0;
+        for (const i of idx) s += won[i];
+        return s / idx.length;
+      },
+      2000,
+    );
+  }
+
   return {
     trades: history.length,
+    events: groups.length,
     wins: winsArr.length,
     losses: lossArr.length,
     winRate:
       winsArr.length + lossArr.length > 0
         ? winsArr.length / (winsArr.length + lossArr.length)
         : null,
+    winRateCI,
+    expectancyCI,
     grossWinUsd: round2(grossWin),
     grossLossUsd: round2(grossLoss),
     profitFactor: grossLoss > 0 && grossWin > 0 ? round2(grossWin / grossLoss) : null,

@@ -106,6 +106,24 @@ export interface KalshiTrade {
   isBlock: boolean;
 }
 
+/** One price level of resting size, denominated in YES cents. */
+export interface BookLevel {
+  priceCents: number;
+  size: number;
+}
+
+/**
+ * A resting book, best-first on both sides and always in YES terms.
+ *
+ * `asks` is derived from Kalshi's NO bid ladder, so an ask here is what it
+ * would cost to buy YES rather than a price anyone literally posted.
+ */
+export interface KalshiBook {
+  ticker: string;
+  bids: BookLevel[];
+  asks: BookLevel[];
+}
+
 interface RawTrade {
   trade_id?: string;
   ticker?: string;
@@ -356,6 +374,54 @@ export class KalshiClient {
     return {
       trades: (data.trades ?? []).map(toTrade),
       cursor: data.cursor ?? "",
+    };
+  }
+
+  /**
+   * Public: the resting order book, normalised to YES cents.
+   *
+   * The app has only ever recorded the touch — one bid, one ask — which says
+   * what a trade would cost but nothing about what is standing behind it. A 1c
+   * spread with 60 contracts resting and a 1c spread with 6,000 are the same
+   * quote and very different markets, and the difference is invisible to every
+   * study run so far.
+   *
+   * Kalshi returns two BID ladders, not a bid side and an ask side:
+   * `yes_dollars` is people bidding for YES, `no_dollars` is people bidding for
+   * NO, both ascending so the touch is the LAST element. A NO bid at 21c is
+   * somebody offering YES at 79c, so the NO ladder is mirrored to give a single
+   * book denominated in YES cents. Getting that backwards would invert the
+   * imbalance the whole study is meant to measure, which is the kind of error
+   * that produces a confident, meaningless answer.
+   */
+  async getOrderbook(ticker: string, depth = 10): Promise<KalshiBook> {
+    const data = await this.request<{
+      orderbook_fp?: { yes_dollars?: [string, string][]; no_dollars?: [string, string][] };
+      orderbook?: { yes?: [number, number][]; no?: [number, number][] };
+    }>("GET", `/markets/${encodeURIComponent(ticker)}/orderbook?depth=${depth}`);
+
+    const fp = data.orderbook_fp;
+    const legacy = data.orderbook;
+    // Dollar strings are canonical; the integer-cent shape is still served to
+    // older clients and costs three lines to keep working.
+    const yesRaw: BookLevel[] = fp?.yes_dollars
+      ? fp.yes_dollars.map(([p, s]) => ({ priceCents: toCents(p), size: parseFloat(s) || 0 }))
+      : (legacy?.yes ?? []).map(([p, s]) => ({ priceCents: p, size: s }));
+    const noRaw: BookLevel[] = fp?.no_dollars
+      ? fp.no_dollars.map(([p, s]) => ({ priceCents: toCents(p), size: parseFloat(s) || 0 }))
+      : (legacy?.no ?? []).map(([p, s]) => ({ priceCents: p, size: s }));
+
+    const clean = (l: BookLevel): boolean =>
+      Number.isFinite(l.priceCents) && l.priceCents > 0 && l.priceCents < 100 && l.size > 0;
+
+    return {
+      ticker,
+      // Best first on both sides: highest bid, lowest ask.
+      bids: yesRaw.filter(clean).sort((a, b) => b.priceCents - a.priceCents),
+      asks: noRaw
+        .filter(clean)
+        .map((l) => ({ priceCents: 100 - l.priceCents, size: l.size }))
+        .sort((a, b) => a.priceCents - b.priceCents),
     };
   }
 

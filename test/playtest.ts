@@ -133,6 +133,17 @@ import {
   shrinkProb,
   sizePosition,
 } from "../electron/engine/sizing";
+import {
+  TOP_LEVELS,
+  bookImbalance,
+  clearDepth,
+  depthInfo,
+  loadDepth,
+  restingWithin,
+  sweepDepth,
+  toPoint,
+  worthRecording,
+} from "../electron/engine/depth";
 import { splitAtGaps, sampledMs, CONTINUOUS_GAP_MS } from "../electron/engine/series";
 import { lag1Autocorrelation } from "../electron/engine/engine";
 
@@ -3429,6 +3440,202 @@ void (async () => {
       const broke = sizePosition({ ...base, report: proven, bankrollCents: 0 });
       check("no bankroll means no position", broke.contracts === 0);
       check("and says which gate closed", broke.reason.includes("bankroll"), broke.reason);
+    }
+  }
+
+  // ------------------------------------------------- depth: what is behind the quote
+  {
+    section("Depth — the resting book, normalised to YES cents");
+
+    const book = (bids: [number, number][], asks: [number, number][]) => ({
+      ticker: "KXBTCD-26AUG2805-T79699.99",
+      bids: bids.map(([priceCents, size]) => ({ priceCents, size })),
+      asks: asks.map(([priceCents, size]) => ({ priceCents, size })),
+    });
+
+    {
+      // Anchored on each side's own touch, never the mid — otherwise a wide
+      // book reports as empty and depth gets confused with spread.
+      const wide = book(
+        [[70, 100], [69, 50], [66, 999]],
+        [[80, 40], [81, 60], [90, 999]],
+      );
+      const r = restingWithin(wide, 3);
+      check("bids counted from the best bid down", r.bid === 150, `got ${r.bid}`);
+      check("asks counted from the best ask up", r.ask === 100, `got ${r.ask}`);
+      check(
+        "a wide book still reports its own depth",
+        restingWithin(wide, 0).bid === 100 && restingWithin(wide, 0).ask === 40,
+      );
+    }
+
+    check("an all-bid book is fully positive", bookImbalance(book([[70, 100]], [])) === 1);
+    check("an all-ask book is fully negative", bookImbalance(book([], [[80, 100]])) === -1);
+    check("a balanced book is zero", bookImbalance(book([[70, 50]], [[71, 50]])) === 0);
+    check(
+      "more bids than asks leans positive",
+      (bookImbalance(book([[70, 300]], [[71, 100]])) ?? 0) > 0,
+    );
+    check(
+      "an empty book is null, never zero",
+      bookImbalance(book([], [])) === null,
+      "absent and balanced mean opposite things",
+    );
+
+    {
+      const deep = book(
+        [[70, 1], [69, 1], [68, 1], [67, 1], [66, 1], [65, 1], [64, 1]],
+        [[71, 1], [72, 1], [73, 1]],
+      );
+      const p = toPoint(deep, 1234);
+      check(`a point keeps ${TOP_LEVELS} levels a side`, p.bids.length === TOP_LEVELS);
+      check("and keeps the ones nearest the touch", p.bids[0][0] === 70);
+      check("a short side is not padded", p.asks.length === 3);
+      check("the timestamp is carried", p.ts === 1234);
+      check("an empty book is not worth a line", !worthRecording(toPoint(book([], []), 1)));
+      check("a one-sided book is", worthRecording(toPoint(book([[70, 5]], []), 1)));
+    }
+
+    {
+      // The mirror is the part most likely to be silently wrong: a NO bid at
+      // 21c is somebody offering YES at 79c. Inverting it would flip every
+      // imbalance the study is meant to measure.
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            orderbook_fp: {
+              yes_dollars: [
+                ["0.6900", "650.00"],
+                ["0.7500", "2065.00"],
+              ],
+              no_dollars: [
+                ["0.1200", "652.00"],
+                ["0.2100", "710.00"],
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as unknown as typeof globalThis.fetch;
+      try {
+        const b = await new KalshiClient().getOrderbook("KXBTCD-26AUG2805-T79699.99");
+        check("bids come back best-first", b.bids[0].priceCents === 75, `got ${b.bids[0]?.priceCents}`);
+        check("bid size is carried", b.bids[0].size === 2065);
+        check(
+          "a 21c NO bid becomes a 79c YES ask",
+          b.asks[0].priceCents === 79,
+          `got ${b.asks[0]?.priceCents}`,
+        );
+        check("asks are best-first too", b.asks[1].priceCents === 88);
+        check("the book is not crossed", b.bids[0].priceCents < b.asks[0].priceCents);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    }
+
+    {
+      clearDepth();
+      const fake = async (ticker: string) => {
+        if (ticker === "BAD") throw new Error("unreachable");
+        return { ...book([[70, 10]], [[72, 20]]), ticker };
+      };
+      const written = await sweepDepth(fake, ["A", "BAD", "C"], 2, 5000);
+      check("one unreachable market does not cost the others", written === 2, `wrote ${written}`);
+      const rows = loadDepth();
+      check("what was swept is on disk", rows.length === 2);
+      check("with the sweep's timestamp", rows[0].ts === 5000);
+      check("and the imbalance survives the round trip", rows[0].bids[0][1] === 10);
+      check(
+        "each row keeps its own ticker",
+        new Set(rows.map((r) => r.ticker)).size === 2,
+        rows.map((r) => r.ticker).join(","),
+      );
+      const info = depthInfo();
+      check("info counts the markets", info.markets === 2);
+      check("and reports the file exists", info.exists);
+      clearDepth();
+      check("clearing removes it", !depthInfo().exists);
+    }
+  }
+
+  // ------------------------------------------- metrics: trades are not the sample
+  {
+    section("Metrics — the trade count is not the sample size");
+
+    const tr = (ticker: string, pnlUsd: number, n: number): TradeRecord => ({
+      ticker,
+      title: "t",
+      side: "yes",
+      entryCents: 50,
+      exitCents: pnlUsd > 0 ? 60 : 40,
+      contracts: 10,
+      pnlUsd,
+      openedAt: n * 1000,
+      closedAt: n * 1000 + 500,
+      reason: "take-profit",
+      dryRun: true,
+    });
+
+    {
+      // Twelve trades, two ladders. The honest denominator is two.
+      const laddered: TradeRecord[] = [];
+      for (let i = 0; i < 6; i++) laddered.push(tr(`KXBTCD-26AUG2621-T${70000 + i}.99`, 5, i));
+      for (let i = 0; i < 6; i++) laddered.push(tr(`KXETHD-26AUG2621-T${3000 + i}.99`, -5, 10 + i));
+      const m = computeMetrics(laddered, []);
+      check("twelve trades are counted as twelve", m.trades === 12);
+      check("but only two events", m.events === 2, `got ${m.events}`);
+      check("an interval is produced", m.expectancyCI !== null);
+      check(
+        "and it spans both ladder outcomes rather than collapsing",
+        m.expectancyCI !== null && m.expectancyCI[0] < 0 && m.expectancyCI[1] > 0,
+        JSON.stringify(m.expectancyCI),
+      );
+    }
+
+    {
+      // The same twelve results spread across twelve independent events must
+      // give a TIGHTER interval than two events did.
+      const spread: TradeRecord[] = [];
+      for (let i = 0; i < 6; i++) spread.push(tr(`KXBTCD-26AUG${2600 + i}-T70000.99`, 5, i));
+      for (let i = 0; i < 6; i++) spread.push(tr(`KXETHD-26AUG${2700 + i}-T3000.99`, -5, 10 + i));
+      const wide = computeMetrics(
+        [
+          ...Array.from({ length: 6 }, (_, i) => tr(`KXBTCD-26AUG2621-T${70000 + i}.99`, 5, i)),
+          ...Array.from({ length: 6 }, (_, i) => tr(`KXETHD-26AUG2621-T${3000 + i}.99`, -5, 10 + i)),
+        ],
+        [],
+      );
+      const tight = computeMetrics(spread, []);
+      check("twelve ladders count as twelve events", tight.events === 12);
+      const wideW = (wide.expectancyCI?.[1] ?? 0) - (wide.expectancyCI?.[0] ?? 0);
+      const tightW = (tight.expectancyCI?.[1] ?? 0) - (tight.expectancyCI?.[0] ?? 0);
+      check(
+        `independent events give a tighter interval (${wideW.toFixed(2)} -> ${tightW.toFixed(2)})`,
+        tightW < wideW,
+      );
+    }
+
+    {
+      const one = computeMetrics([tr("KXBTCD-26AUG2621-T70000.99", 5, 1)], []);
+      check("a single trade earns no interval", one.expectancyCI === null);
+      check("but still reports its event", one.events === 1);
+      const none = computeMetrics([], []);
+      check("an empty history has no events", none.events === 0);
+      check("and no intervals", none.expectancyCI === null && none.winRateCI === null);
+    }
+
+    {
+      // Flat trades break neither streak and must not enter the win-rate
+      // interval either, matching how winRate itself is computed.
+      const withFlat = [
+        tr("KXBTCD-26AUG2601-T1.99", 5, 1),
+        tr("KXBTCD-26AUG2602-T1.99", 0, 2),
+        tr("KXBTCD-26AUG2603-T1.99", -5, 3),
+      ];
+      const m = computeMetrics(withFlat, []);
+      check("a flat trade counts in the trade total", m.trades === 3);
+      check("but not as a win or a loss", m.wins === 1 && m.losses === 1);
+      check("and the win rate interval still exists", m.winRateCI !== null);
     }
   }
 
