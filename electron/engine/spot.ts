@@ -79,22 +79,105 @@ export async function fetchCandles(product: string, asset: string): Promise<Spot
     headers: { accept: "application/json", "user-agent": "rom-trader" },
   });
   if (!res.ok) throw new Error(`Coinbase ${product} -> ${res.status}`);
-  const rows = (await res.json()) as number[][];
-  // [ time, low, high, open, close, volume ], newest first.
-  const asc = rows
+  return closesToPoints(parseCandles(await res.json()), asset);
+}
+
+/** [ time, low, high, open, close, volume ], newest first, to ascending closes. */
+function parseCandles(body: unknown): { ts: number; close: number }[] {
+  const rows = Array.isArray(body) ? (body as number[][]) : [];
+  return rows
     .filter((r) => Array.isArray(r) && r.length >= 5 && Number.isFinite(r[4]))
     .map((r) => ({ ts: r[0] * 1000, close: r[4] }))
     .sort((a, b) => a.ts - b.ts);
+}
 
+/**
+ * Attach the sigma that was knowable AT each minute.
+ *
+ * Computed over the merged series rather than per request, which is the whole
+ * reason the paging function collects raw closes before calling this. Slicing
+ * a long history into chunks and computing sigma inside each one would leave
+ * the first hour of every chunk with a truncated window — a sawtooth of
+ * artificially low volatility, recurring every 300 minutes, that would make
+ * the model most confident exactly where it knew least.
+ */
+function closesToPoints(asc: { ts: number; close: number }[], asset: string): SpotPoint[] {
   const out: SpotPoint[] = [];
   for (let i = 0; i < asc.length; i++) {
-    // Sigma from the closes available up to and including this minute — never
-    // from later ones. A study that used future candles to price a past
-    // decision would be measuring hindsight.
+    // Never from later closes. A study that used future candles to price a
+    // past decision would be measuring hindsight.
     const window = asc.slice(Math.max(0, i - 60), i + 1).map((p) => p.close);
     out.push({ ts: asc[i].ts, asset, close: asc[i].close, sigma: sigma1m(window) });
   }
   return out;
+}
+
+/** Coinbase caps a start/end candle request at 300 rows. */
+const PAGE_MINUTES = 300;
+
+/** Public endpoint allows ~10 req/s; this stays an order of magnitude under. */
+const PAGE_DELAY_MS = 120;
+
+/** Refuse to page forever if the endpoint starts returning overlapping windows. */
+const MAX_PAGES = 60;
+
+/**
+ * Spot history reaching as far back as asked, by walking the endpoint
+ * backwards.
+ *
+ * The single-request version returns 350 minutes, which is under six hours —
+ * and that turned out to be the binding constraint on every measurement built
+ * on it. The fair-value study could only price markets from the last six
+ * hours, which are precisely the markets that have NOT settled yet, so 97.6%
+ * of its population had no outcome and the eight events that survived could
+ * not answer anything. Meanwhile five days of recorded scans sat in the
+ * archive, every one of them long since resolved.
+ *
+ * Paging turns that around: the further back the history reaches, the more of
+ * the sample has a known outcome. The exclusion rate and the sample size move
+ * in opposite directions for once.
+ */
+export async function fetchCandleHistory(
+  product: string,
+  asset: string,
+  sinceMs: number,
+  now = Date.now(),
+): Promise<SpotPoint[]> {
+  const merged = new Map<number, number>();
+  let end = now;
+
+  for (let page = 0; page < MAX_PAGES && end > sinceMs; page++) {
+    const start = Math.max(sinceMs, end - PAGE_MINUTES * 60_000);
+    const url =
+      `${CANDLES}/${product}/candles?granularity=60` +
+      `&start=${new Date(start).toISOString()}&end=${new Date(end).toISOString()}`;
+    const res = await fetch(url, {
+      headers: { accept: "application/json", "user-agent": "rom-trader" },
+    });
+    if (!res.ok) {
+      // A failed page mid-walk still leaves usable history behind it; throwing
+      // away four days because the fifth rate-limited would be worse than
+      // returning what arrived.
+      if (merged.size === 0) throw new Error(`Coinbase ${product} -> ${res.status}`);
+      break;
+    }
+    const rows = parseCandles(await res.json());
+    if (rows.length === 0) break;
+
+    const before = merged.size;
+    for (const r of rows) merged.set(r.ts, r.close);
+    // No new minutes means the endpoint is clamping the window; walking
+    // further would spend requests to receive the same rows again.
+    if (merged.size === before) break;
+
+    end = rows[0].ts - 60_000;
+    if (PAGE_DELAY_MS > 0) await new Promise((r) => setTimeout(r, PAGE_DELAY_MS));
+  }
+
+  const asc = [...merged.entries()]
+    .map(([ts, close]) => ({ ts, close }))
+    .sort((a, b) => a.ts - b.ts);
+  return closesToPoints(asc, asset);
 }
 
 /** Newest recorded timestamp per asset, so a poll only appends what is new. */

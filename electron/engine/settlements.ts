@@ -35,6 +35,17 @@ const PENDING_FILE = "settle-pending.json";
 const SETTLED_FILE = "settlements.jsonl";
 
 /**
+ * Where `scripts/backfill.ts` puts outcomes it collected for markets the
+ * sweeper never saw.
+ *
+ * A separate file because the app is normally running and appending to
+ * `settlements.jsonl` while the backfill runs; two processes appending to one
+ * log is a torn line waiting to happen. Everything that reads the record reads
+ * both, so the split is invisible downstream.
+ */
+export const BACKFILL_FILE = "settlements-backfill.jsonl";
+
+/**
  * How long after the close to wait before the first lookup. Kalshi resolves a
  * market some minutes after trading ends, and asking too early spends a
  * request to be told nothing.
@@ -193,18 +204,31 @@ export function appendSettlement(s: Settlement): void {
   }
 }
 
-/** Every outcome recorded so far. Tolerates a torn final line, like the recorder. */
+/**
+ * Every outcome recorded so far, from the live sweep and the backfill both.
+ * Tolerates a torn final line, like the recorder.
+ *
+ * Deduped by ticker because the two files legitimately overlap: a market the
+ * backfill answered can also be sitting in the pending map, and the sweeper
+ * will happily record it a second time. Counting one market twice would
+ * quietly double its weight in every rate the studies compute.
+ */
 export function loadSettlements(): Settlement[] {
-  const p = settledPath();
-  if (!fs.existsSync(p)) return [];
   const out: Settlement[] = [];
-  for (const line of fs.readFileSync(p, "utf-8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const s = JSON.parse(line) as Settlement;
-      if (typeof s.ticker === "string" && typeof s.result === "string") out.push(s);
-    } catch {
-      // partial line from a killed process
+  const seen = new Set<string>();
+  for (const p of [settledPath(), path.join(dataDir(), BACKFILL_FILE)]) {
+    if (!fs.existsSync(p)) continue;
+    for (const line of fs.readFileSync(p, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const s = JSON.parse(line) as Settlement;
+        if (typeof s.ticker !== "string" || typeof s.result !== "string") continue;
+        if (seen.has(s.ticker)) continue;
+        seen.add(s.ticker);
+        out.push(s);
+      } catch {
+        // partial line from a killed process
+      }
     }
   }
   return out;

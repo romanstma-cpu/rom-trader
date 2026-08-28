@@ -1,35 +1,57 @@
 /**
  * Does a fair-value model beat the Kalshi book?
  *
- * Every strategy this app has measured reads the contract's own price. All of
- * them lose: momentum by less than the fee, resting bids by twelve points of
- * adverse selection, the favourite band by more than it costs to buy. What
- * none of them ever did was look at BTC.
+ * The first version of this study answered yes, and the answer was worthless.
+ * It reported twenty-one wins from twenty-one signals and a Wilson lower bound
+ * of 88.6%, on a sample where 95% of signals had been thrown away for lacking a
+ * recorded outcome and where the surviving twenty-one came from a handful of
+ * BTC hours. Three findings were tangled together and only one of them was
+ * about the model:
  *
- * A ladder strike resolves on the underlying, so given spot, realized
- * volatility and the minutes left there is a computable probability — and if
- * that probability beats the ask by more than the taker fee, the difference is
- * an edge that needs no view on direction. This asks whether it does, on ROM's
- * own recorded quotes and Kalshi's own recorded settlements.
+ *   1. Wilson assumes independent trials. A ladder of strikes over one BTC
+ *      hour is ONE trial wearing a dozen coats — they settle together on the
+ *      same path. The interval was narrowed by a sqrt(N) that was never earned.
  *
- * Spot is backfilled from Coinbase, which serves ~350 one-minute candles per
- * request, so this can be run against settlements that have ALREADY happened
- * rather than waiting for the recorder to accumulate. The sigma attached to
- * each minute is computed only from closes at or before it — using later
- * candles to price an earlier decision would be measuring hindsight, which is
- * the single easiest way to manufacture an edge that is not there.
+ *   2. 61% of the markets in this app's settlement record resolve NO. Any
+ *      strategy that leans NO harvests that structural tilt and looks like a
+ *      forecaster. Comparing a win rate to 50% compares it to a baseline
+ *      nobody offers.
+ *
+ *   3. A 95% exclusion rate is not a filter, it is a different population.
+ *
+ * This version fixes all three. Intervals come from an event-clustered
+ * bootstrap, so the denominator is events. Every number is reported beside the
+ * same number computed with the model switched off — always-YES and always-NO
+ * over the identical rows — and the difference is the only part that is about
+ * the model. The exclusion rate is printed before any result, because a
+ * flattering number computed on 5% of the data is not a smaller version of the
+ * truth.
+ *
+ * Spot is backfilled from Coinbase (~350 one-minute candles per request), so
+ * this runs against settlements that have already happened. The sigma attached
+ * to each minute uses only closes at or before it; pricing an earlier decision
+ * with later candles measures hindsight, which is the easiest way to invent an
+ * edge that is not there.
  *
  *   npx esbuild scripts/fairvalue.ts --bundle --platform=node \
  *     --alias:electron=./test/electron-stub.js --outfile=scripts/fairvalue.js
- *   node scripts/fairvalue.js [--in <scans.jsonl>] [--minedge 2]
+ *   node scripts/fairvalue.js [--in <scans.jsonl>] [--minedge 2] [--minprob 0.9]
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { KalshiMarket } from "../electron/engine/kalshi";
 import type { RecordedScan } from "../electron/engine/recorder";
-import type { Settlement } from "../electron/engine/settlements";
-import { modelEdgeNetCents, settlementUpProb, wilsonLowerBound } from "../electron/engine/fairvalue";
-import { TRACKED, assetForTicker, fetchCandles, type SpotPoint } from "../electron/engine/spot";
+import { BACKFILL_FILE, type Settlement } from "../electron/engine/settlements";
+import { modelEdgeNetCents, oneLotFeeCents, settlementUpProb } from "../electron/engine/fairvalue";
+import {
+  eventOf,
+  skillReport,
+  strategyTag,
+  tagPerformance,
+  type SkillReport,
+  type SkillRow,
+} from "../electron/engine/skill";
+import { TRACKED, assetForTicker, fetchCandleHistory, type SpotPoint } from "../electron/engine/spot";
 
 const argStr = (name: string, fallback: string): string => {
   const i = process.argv.indexOf(`--${name}`);
@@ -39,6 +61,8 @@ const argNum = (name: string, fallback: number): number => {
   const v = Number(argStr(name, String(fallback)));
   return Number.isFinite(v) ? v : fallback;
 };
+
+const fee = (priceCents: number): number => oneLotFeeCents(priceCents, "cent");
 
 function loadScans(file: string): RecordedScan[] {
   const out: RecordedScan[] = [];
@@ -54,17 +78,21 @@ function loadScans(file: string): RecordedScan[] {
   return out;
 }
 
-function loadSettlements(file: string): Map<string, "yes" | "no"> {
+function loadSettlements(files: string[]): Map<string, "yes" | "no"> {
   const map = new Map<string, "yes" | "no">();
-  if (!fs.existsSync(file)) return map;
-  for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const s = JSON.parse(line) as Settlement;
-      const r = (s.result ?? "").trim().toLowerCase();
-      if (r === "yes" || r === "no") map.set(s.ticker, r);
-    } catch {
-      // partial line
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const s = JSON.parse(line) as Settlement;
+        const r = (s.result ?? "").trim().toLowerCase();
+        // "scalar" and "void" appear in the record and are neither a win nor a
+        // loss. Mapping them to either would quietly corrupt every rate below.
+        if (r === "yes" || r === "no") map.set(s.ticker, r);
+      } catch {
+        // partial line
+      }
     }
   }
   return map;
@@ -80,7 +108,7 @@ function strikeOf(ticker: string): number | null {
   return Number.isFinite(v) ? v : null;
 }
 
-/** Nearest recorded spot point at or before `ts`, per asset. */
+/** Nearest recorded spot point at or before `ts`. */
 function spotAt(series: SpotPoint[], ts: number): SpotPoint | null {
   let lo = 0;
   let hi = series.length - 1;
@@ -98,196 +126,292 @@ function spotAt(series: SpotPoint[], ts: number): SpotPoint | null {
   return best;
 }
 
-interface Candidate {
+interface Row extends SkillRow {
   ts: number;
-  ticker: string;
   asset: string;
-  modelProb: number;
-  side: "yes" | "no";
-  askCents: number;
-  netEdge: number;
+  claimedEdge: number;
   minsLeft: number;
-  won: boolean;
+  tag: string;
+}
+
+function pct(x: number): string {
+  return `${(x * 100).toFixed(1)}%`;
+}
+function cents(x: number): string {
+  return `${x >= 0 ? "+" : ""}${x.toFixed(2)}c`;
+}
+
+/** One market-scan's worth of arithmetic, or null when it cannot be priced. */
+function evaluate(
+  m: KalshiMarket,
+  scanTs: number,
+  asset: string,
+  sp: SpotPoint,
+  outcome: "yes" | "no",
+): Row | null {
+  const strike = strikeOf(m.ticker);
+  if (strike === null || sp.sigma === null || !m.close_ts) return null;
+  const minsLeft = (m.close_ts * 1000 - scanTs) / 60_000;
+  if (minsLeft <= 0.5 || minsLeft > 60) return null;
+
+  const p = settlementUpProb({ spot: sp.close, strike, sigma: sp.sigma, minsLeft });
+  if (p === null) return null;
+
+  const yesAsk = m.yes_ask > 0 && m.yes_ask < 100 ? m.yes_ask : null;
+  const noAsk = m.yes_bid > 0 && m.yes_bid < 100 ? 100 - m.yes_bid : null;
+  if (yesAsk === null || noAsk === null) return null;
+
+  const edge = modelEdgeNetCents({ upProb: p, yesAskCents: yesAsk, noAskCents: noAsk });
+  if (!edge) return null;
+
+  const side = edge.side;
+  const cost = side === "yes" ? yesAsk : noAsk;
+  const won = (side === "yes") === (outcome === "yes");
+  const pnlCents = (won ? 100 : 0) - cost - fee(cost);
+
+  // The book's own forecast is the mid, not the side we happen to be lifting —
+  // scoring the market on the ask we chose to cross would credit the model for
+  // the spread it paid.
+  const marketProb = (m.yes_bid + m.yes_ask) / 200;
+
+  return {
+    ticker: m.ticker,
+    event: eventOf(m.ticker),
+    modelProb: p,
+    marketProb,
+    priceCents: cost,
+    yesAskCents: yesAsk,
+    noAskCents: noAsk,
+    outcome: outcome === "yes" ? 1 : 0,
+    side,
+    pnlCents,
+    ts: scanTs,
+    asset,
+    claimedEdge: edge.netCents,
+    minsLeft,
+    tag: strategyTag({ asset, side, edgeCents: edge.netCents, minsLeft }),
+  };
+}
+
+/** One row per market — the same mispricing seen on forty scans is one chance. */
+function firstSighting(rows: Row[]): Row[] {
+  const byTicker = new Map<string, Row>();
+  for (const r of rows) {
+    const prev = byTicker.get(r.ticker);
+    if (!prev || r.ts < prev.ts) byTicker.set(r.ticker, r);
+  }
+  return [...byTicker.values()].sort((a, b) => a.ts - b.ts);
+}
+
+function printReport(title: string, rep: SkillReport): void {
+  console.log(`\n  ${title}`);
+  console.log(`  ${"=".repeat(title.length)}\n`);
+  if (rep.n === 0) {
+    console.log(`    no rows\n`);
+    return;
+  }
+  console.log(`    rows                ${rep.n.toLocaleString()}`);
+  console.log(
+    `    independent events  ${rep.events.toLocaleString()}` +
+      `   <- the honest denominator`,
+  );
+  console.log(
+    `    hit rate            ${pct(rep.hitRate)}  ` +
+      `clustered 95% CI [${pct(rep.hitRateCI[0])}, ${pct(rep.hitRateCI[1])}]`,
+  );
+  console.log(
+    `                            ` +
+      `naive  95% CI [${pct(rep.hitRateNaiveCI[0])}, ${pct(rep.hitRateNaiveCI[1])}]  <- the wrong one`,
+  );
+  console.log(`    Brier model         ${rep.brierModel.toFixed(4)}`);
+  console.log(`    Brier book          ${rep.brierMarket.toFixed(4)}`);
+  console.log(
+    `    skill vs book       ${pct(rep.skill)}  ` +
+      `clustered 95% CI [${pct(rep.skillCI[0])}, ${pct(rep.skillCI[1])}]`,
+  );
+  console.log(`    P&L per contract    ${cents(rep.pnlPerContract)}\n`);
+
+  console.log(`    the same rows with the model switched off:`);
+  for (const b of rep.baselines) {
+    const delta = rep.pnlPerContract - b.pnlPerContract;
+    console.log(
+      `      ${b.label.padEnd(12)} hit ${pct(b.hitRate).padStart(6)}  ` +
+        `${cents(b.pnlPerContract).padStart(8)}   model beats it by ${cents(delta)}`,
+    );
+  }
+
+  if (rep.bands.length > 0) {
+    console.log(`\n    within each entry-price band (controls for buying favourites):`);
+    console.log(
+      `      ${"band".padEnd(9)} ${"n".padStart(6)} ${"model".padStart(9)} ` +
+        `${"best dumb".padStart(10)} ${"delta".padStart(9)}`,
+    );
+    for (const b of rep.bands) {
+      console.log(
+        `      ${b.band.padEnd(9)} ${String(b.n).padStart(6)} ${cents(b.modelPnl).padStart(9)} ` +
+          `${cents(b.baselinePnl).padStart(10)} ${cents(b.deltaCents).padStart(9)}`,
+      );
+    }
+  }
+  console.log(`\n    VERDICT: ${rep.verdict}\n`);
 }
 
 async function main(): Promise<void> {
   const dir = path.join(process.env.APPDATA ?? ".", "ROM Trader");
-  const scanFile = argStr("in", path.join(dir, "scans.jsonl"));
-  const settleFile = argStr("settle", path.join(dir, "settlements.jsonl"));
+  const settleFiles = [path.join(dir, "settlements.jsonl"), path.join(dir, BACKFILL_FILE)];
   const minEdge = argNum("minedge", 2);
   const minProb = argNum("minprob", 0.9);
+  const days = argNum("days", 6);
 
-  const scans = loadScans(scanFile);
-  const settled = loadSettlements(settleFile);
+  // Default to every recorded sweep, archives included. The archive holds the
+  // markets that have actually settled, which is the entire population worth
+  // measuring; reading only the live file is how the last run ended up with
+  // eight events.
+  const explicit = argStr("in", "");
+  const scanFiles = explicit
+    ? [explicit]
+    : fs
+        .readdirSync(dir)
+        .filter((f) => f === "scans.jsonl" || /^scans-archive-.*\.jsonl$/.test(f))
+        .map((f) => path.join(dir, f));
+
+  const scans: RecordedScan[] = [];
+  for (const f of scanFiles) {
+    if (fs.existsSync(f)) scans.push(...loadScans(f));
+  }
+  scans.sort((a, b) => a.ts - b.ts);
+  const settled = loadSettlements(settleFiles);
   if (scans.length === 0) {
-    console.log(`No scans in ${scanFile}`);
+    console.log(`No scans found in ${dir}`);
     return;
   }
 
   console.log(`\n=== Does a fair-value model beat the book? ===`);
   console.log(
-    `  ${path.basename(scanFile)} · ${scans.length.toLocaleString()} scans · ` +
+    `  ${scanFiles.map((f) => path.basename(f)).join(" + ")}\n` +
+      `  ${scans.length.toLocaleString()} scans · ` +
       `${settled.size.toLocaleString()} recorded settlements\n`,
   );
 
-  // Backfill spot for every tracked asset.
-  process.stdout.write("  fetching spot candles… ");
+  const sinceMs = Math.max(scans[0].ts - 60 * 60_000, Date.now() - days * 86_400_000);
+  process.stdout.write(`  fetching ${days}d of spot candles (paged)… `);
   const byAsset = new Map<string, SpotPoint[]>();
   for (const t of TRACKED) {
     try {
-      byAsset.set(t.asset, await fetchCandles(t.product, t.asset));
+      byAsset.set(t.asset, await fetchCandleHistory(t.product, t.asset, sinceMs));
     } catch (e) {
       console.log(`\n  ${t.asset}: ${(e as Error).message}`);
     }
   }
-  const covered = [...byAsset.entries()].map(([a, p]) => `${a}:${p.length}`).join(" ");
-  console.log(`${covered}`);
-  const spotStart = Math.min(...[...byAsset.values()].filter((p) => p.length).map((p) => p[0].ts));
+  console.log([...byAsset.entries()].map(([a, p]) => `${a}:${p.length}`).join(" "));
+  const withData = [...byAsset.values()].filter((p) => p.length);
+  if (withData.length === 0) {
+    console.log(`  No spot history could be fetched — nothing can be priced.\n`);
+    return;
+  }
+  const spotStart = Math.min(...withData.map((p) => p[0].ts));
   console.log(`  spot history reaches back to ${new Date(spotStart).toISOString().slice(0, 16)}\n`);
 
-  // ------------------------------------------------------------- evaluate
-  const candidates: Candidate[] = [];
-  let considered = 0;
-  let noStrike = 0;
-  let noSpot = 0;
-  let noSettlement = 0;
+  // ----------------------------------------------------------------- evaluate
+  const priced: Row[] = [];
+  let pricedNoOutcome = 0;
 
   for (const scan of scans) {
     if (scan.ts < spotStart) continue;
     for (const m of scan.markets as KalshiMarket[]) {
       const asset = assetForTicker(m.ticker);
       if (!asset) continue;
-      const strike = strikeOf(m.ticker);
-      if (strike === null) {
-        noStrike++;
-        continue;
-      }
       const series = byAsset.get(asset);
       if (!series?.length) continue;
       const sp = spotAt(series, scan.ts);
-      if (!sp || sp.sigma === null) {
-        noSpot++;
-        continue;
-      }
-      if (!m.close_ts) continue;
-      const minsLeft = (m.close_ts * 1000 - scan.ts) / 60_000;
-      if (minsLeft <= 0.5 || minsLeft > 60) continue;
-
-      considered++;
-      const p = settlementUpProb({ spot: sp.close, strike, sigma: sp.sigma, minsLeft });
-      if (p === null) continue;
-
-      const edge = modelEdgeNetCents({
-        upProb: p,
-        yesAskCents: m.yes_ask > 0 && m.yes_ask < 100 ? m.yes_ask : null,
-        noAskCents: m.yes_bid > 0 && m.yes_bid < 100 ? 100 - m.yes_bid : null,
-      });
-      if (!edge || edge.netCents < minEdge) continue;
-
-      const sideProb = edge.side === "yes" ? p : 1 - p;
-      if (sideProb < minProb) continue;
-
+      if (!sp) continue;
       const outcome = settled.get(m.ticker);
       if (!outcome) {
-        noSettlement++;
+        // Count only rows the model could actually have priced, so the
+        // exclusion rate is about missing outcomes rather than missing spot.
+        if (strikeOf(m.ticker) !== null && sp.sigma !== null) pricedNoOutcome++;
         continue;
       }
-      candidates.push({
-        ts: scan.ts,
-        ticker: m.ticker,
-        asset,
-        modelProb: sideProb,
-        side: edge.side,
-        askCents: edge.askCents,
-        netEdge: edge.netCents,
-        minsLeft,
-        won: (edge.side === "yes") === (outcome === "yes"),
-      });
+      const row = evaluate(m, scan.ts, asset, sp, outcome);
+      if (row) priced.push(row);
     }
   }
 
-  console.log(`  ${considered.toLocaleString()} market-scans priced by the model`);
-  console.log(
-    `  filtered out: ${noStrike.toLocaleString()} without a parseable strike, ` +
-      `${noSpot.toLocaleString()} without usable spot, ` +
-      `${noSettlement.toLocaleString()} signals with no recorded outcome yet\n`,
-  );
+  const universe = firstSighting(priced);
+  const totalPriceable = universe.length + pricedNoOutcome;
+  const exclusion = totalPriceable > 0 ? pricedNoOutcome / totalPriceable : 1;
 
-  if (candidates.length === 0) {
+  console.log(`  ---------------------------------------------------------------`);
+  console.log(`  SAMPLE HEALTH — read this before any result below`);
+  console.log(`  ---------------------------------------------------------------`);
+  console.log(`    market-scans the model could price   ${totalPriceable.toLocaleString()}`);
+  console.log(
+    `    of those, no recorded outcome yet    ${pricedNoOutcome.toLocaleString()} (${pct(exclusion)})`,
+  );
+  console.log(`    usable rows (one per market)         ${universe.length.toLocaleString()}`);
+  if (exclusion > 0.5) {
     console.log(
-      `  NO SIGNALS cleared ${minEdge}c net edge at ${(minProb * 100).toFixed(0)}% model confidence\n` +
-        `  with a recorded settlement. That is a result, not a failure: either the\n` +
-        `  book is not mispriced by this much, or not enough of these markets have\n` +
-        `  settled yet. Leave the recorder running and try again.\n`,
+      `\n    WARNING: more than half the population is missing. Markets that\n` +
+        `    settle quickly, or that stayed liquid enough to keep being scanned,\n` +
+        `    are over-represented in what survives. Treat everything below as a\n` +
+        `    dry run of the arithmetic, not as an answer.`,
     );
+  }
+  console.log(`  ---------------------------------------------------------------`);
+
+  if (universe.length === 0) {
+    console.log(`\n  Nothing to measure yet. Leave the recorder running.\n`);
     return;
   }
 
-  // One signal per ticker — the same mispricing seen on forty consecutive
-  // scans is one opportunity, not forty, and counting it forty times would
-  // inflate both the sample and the confidence in it.
-  const byTicker = new Map<string, Candidate>();
-  for (const c of candidates) {
-    const prev = byTicker.get(c.ticker);
-    if (!prev || c.ts < prev.ts) byTicker.set(c.ticker, c);
-  }
-  const trades = [...byTicker.values()].sort((a, b) => a.ts - b.ts);
+  // The control arm. Every market the model could price, traded on whichever
+  // side the model preferred, with no edge filter and no confidence filter.
+  // If this arm looks profitable the sample is bent, because a book this
+  // liquid does not hand out free money on every strike.
+  printReport("CONTROL — every priceable market, model picks the side", skillReport(universe, fee));
 
-  const wins = trades.filter((t) => t.won).length;
-  const rate = wins / trades.length;
-  const bound = wilsonLowerBound(wins, trades.length);
-  const pnl = trades.reduce(
-    (s, t) => s + (t.won ? 100 - t.askCents : -t.askCents) - (t.netEdge >= 0 ? 1 : 1),
-    0,
+  const signals = universe.filter((r) => r.claimedEdge >= minEdge)
+    .filter((r) => (r.side === "yes" ? r.modelProb : 1 - r.modelProb) >= minProb);
+
+  printReport(
+    `SIGNALS — ${minEdge}c+ claimed net edge at ${(minProb * 100).toFixed(0)}%+ model confidence`,
+    skillReport(signals, fee),
   );
 
-  console.log(`  SIGNALS (first sighting per market, ${minEdge}c+ net edge, ${(minProb * 100).toFixed(0)}%+ model)\n`);
-  console.log(`  distinct markets:  ${trades.length}`);
-  console.log(`  model was right:   ${wins} (${(rate * 100).toFixed(1)}%)`);
-  console.log(`  Wilson lower bound: ${(bound * 100).toFixed(1)}%  <- the number to judge on`);
-  console.log(`  mean model prob:   ${((trades.reduce((s, t) => s + t.modelProb, 0) / trades.length) * 100).toFixed(1)}%`);
-  console.log(`  mean ask paid:     ${(trades.reduce((s, t) => s + t.askCents, 0) / trades.length).toFixed(1)}c`);
-  console.log(`  mean claimed edge: ${(trades.reduce((s, t) => s + t.netEdge, 0) / trades.length).toFixed(2)}c`);
-  console.log(`  realised P&L:      ${pnl >= 0 ? "+" : ""}${pnl.toFixed(0)}c per contract, one lot each\n`);
-
-  // Calibration is the honest test: if the model says 97% it should be right
-  // about 97% of the time. A model that is right less often than it claims is
-  // not a small problem, it is the whole problem.
-  console.log(`  CALIBRATION — does the model's confidence mean anything?\n`);
-  console.log(`  ${"model says".padEnd(14)} ${"n".padStart(5)} ${"actually won".padStart(14)} ${"gap".padStart(8)}`);
-  console.log(`  ${"-".repeat(14)} ${"-".repeat(5)} ${"-".repeat(14)} ${"-".repeat(8)}`);
-  for (const [lo, hi] of [[0.9, 0.95], [0.95, 0.98], [0.98, 0.995], [0.995, 1.001]]) {
-    const bucket = trades.filter((t) => t.modelProb >= lo && t.modelProb < hi);
-    if (bucket.length === 0) continue;
-    const w = bucket.filter((t) => t.won).length;
-    const actual = w / bucket.length;
-    const claimed = bucket.reduce((s, t) => s + t.modelProb, 0) / bucket.length;
-    console.log(
-      `  ${`${(lo * 100).toFixed(1)}-${(hi * 100).toFixed(1)}%`.padEnd(14)} ${String(bucket.length).padStart(5)} ` +
-        `${`${(actual * 100).toFixed(1)}%`.padStart(14)} ${`${((actual - claimed) * 100).toFixed(1)}pp`.padStart(8)}`,
-    );
-  }
-
-  // Per asset, because one underlying carrying the whole result is the tell
-  // for a fluke.
-  console.log(`\n  BY UNDERLYING\n`);
-  console.log(`  ${"asset".padEnd(7)} ${"n".padStart(5)} ${"won".padStart(7)} ${"P&L/ct".padStart(9)}`);
-  console.log(`  ${"-".repeat(7)} ${"-".repeat(5)} ${"-".repeat(7)} ${"-".repeat(9)}`);
-  for (const a of [...new Set(trades.map((t) => t.asset))]) {
-    const rows = trades.filter((t) => t.asset === a);
-    const w = rows.filter((t) => t.won).length;
-    const p = rows.reduce((s, t) => s + (t.won ? 100 - t.askCents : -t.askCents) - 1, 0) / rows.length;
-    console.log(
-      `  ${a.padEnd(7)} ${String(rows.length).padStart(5)} ${`${((w / rows.length) * 100).toFixed(0)}%`.padStart(7)} ` +
-        `${`${p >= 0 ? "+" : ""}${p.toFixed(1)}c`.padStart(9)}`,
-    );
+  // ------------------------------------------------------------- by tag
+  if (signals.length > 0) {
+    const tags = tagPerformance(signals).filter((t) => t.n >= 3);
+    if (tags.length > 0) {
+      console.log(`  BY STRATEGY SLICE (worst first, 3+ rows)\n`);
+      console.log(
+        `    ${"tag".padEnd(26)} ${"n".padStart(5)} ${"events".padStart(7)} ` +
+          `${"hit".padStart(7)} ${"P&L/ct".padStart(9)}`,
+      );
+      console.log(`    ${"-".repeat(26)} ${"-".repeat(5)} ${"-".repeat(7)} ${"-".repeat(7)} ${"-".repeat(9)}`);
+      for (const t of tags) {
+        console.log(
+          `    ${t.tag.padEnd(26)} ${String(t.n).padStart(5)} ${String(t.events).padStart(7)} ` +
+            `${pct(t.hitRate).padStart(7)} ${cents(t.pnlPerContract).padStart(9)}`,
+        );
+      }
+      console.log(
+        `\n    One number for a strategy hides the case where half its slices pay\n` +
+          `    and half bleed. A blended near-break-even is exactly the shape that\n` +
+          `    takes, and it looks identical to a strategy that does not work.\n`,
+      );
+    }
   }
 
   console.log(
-    `\n  Judge this on the Wilson bound and the calibration gap, not the win rate.\n` +
-      `  A model that claims 97% and delivers 80% is not a slightly worse model —\n` +
-      `  it is priced for a certainty it does not have, and the losses come in the\n` +
-      `  three percent it dismissed.\n`,
+    `  HOW TO READ THIS\n\n` +
+      `    The only line that is about the model is the DELTA against the dumb\n` +
+      `    baselines, and the only interval worth quoting is the clustered one.\n` +
+      `    A ladder of strikes over one BTC hour settles as a single event; the\n` +
+      `    naive interval prints beside it to show how much confidence gets\n` +
+      `    manufactured by pretending otherwise.\n\n` +
+      `    Skill is 1 - brierModel/brierBook. Positive means the model carries\n` +
+      `    information the price does not. Zero means it is an expensive way to\n` +
+      `    reproduce the ask.\n`,
   );
 }
 

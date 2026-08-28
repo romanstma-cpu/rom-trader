@@ -110,6 +110,29 @@ import {
   type PendingMap,
 } from "../electron/engine/settlements";
 import { computeMetrics } from "../electron/engine/metrics";
+import {
+  bootstrapCI,
+  brier,
+  clusterBootstrapCI,
+  dumbBaselines,
+  effectiveN,
+  eventOf,
+  groupByEvent,
+  seededRandom,
+  skillReport,
+  skillScore,
+  strategyTag,
+  tagPerformance,
+  withinBandSkill,
+  type SkillReport,
+  type SkillRow,
+} from "../electron/engine/skill";
+import {
+  kellyFraction,
+  shrinkFactor,
+  shrinkProb,
+  sizePosition,
+} from "../electron/engine/sizing";
 import { splitAtGaps, sampledMs, CONTINUOUS_GAP_MS } from "../electron/engine/series";
 import { lag1Autocorrelation } from "../electron/engine/engine";
 
@@ -3071,6 +3094,341 @@ void (async () => {
       check("no retry was issued for the write", seen.length === 1);
     } finally {
       globalThis.fetch = realFetch;
+    }
+  }
+
+  // ------------------------------------------------- skill: honest denominators
+  {
+    section("Skill — is the model better than the book, or just luckier?");
+
+    const fee = (c: number): number => oneLotFeeCents(c, "cent");
+
+    check("Brier is zero for a certain, correct call", brier(1, 1) === 0);
+    check("Brier is 0.25 for a coin flip", brier(0.5, 1) === 0.25);
+    check(
+      "a confident wrong call scores worse than an unsure one",
+      brier(0.95, 0) > brier(0.55, 0),
+    );
+
+    check("skill is positive when the model's error is smaller", skillScore(0.05, 0.10) > 0);
+    check("skill is zero when the two agree", skillScore(0.10, 0.10) === 0);
+    check("skill is negative when the book forecasts better", skillScore(0.20, 0.10) < 0);
+
+    // Determinism is the whole point of the seeded generator: an interval that
+    // moves between runs cannot answer whether a change to the model helped.
+    const a = seededRandom(99);
+    const b = seededRandom(99);
+    check(
+      "the same seed produces the same stream",
+      [0, 1, 2, 3, 4].every(() => a() === b()),
+    );
+    check("different seeds diverge", seededRandom(1)() !== seededRandom(2)());
+
+    const flat = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
+    const mean = (s: number[]): number => s.reduce((x, y) => x + y, 0) / s.length;
+    check(
+      "a bootstrap interval is reproducible",
+      JSON.stringify(bootstrapCI(flat, mean, 500, 0.05, 7)) ===
+        JSON.stringify(bootstrapCI(flat, mean, 500, 0.05, 7)),
+    );
+
+    // THE correction. Twenty events of five perfectly-correlated contracts:
+    // the honest N is 20, the row bootstrap believes it is 100.
+    {
+      const rows: number[] = [];
+      const groups: number[][] = [];
+      for (let e = 0; e < 20; e++) {
+        const outcome = e % 2 === 0 ? 1 : 0;
+        const g: number[] = [];
+        for (let c = 0; c < 5; c++) {
+          g.push(rows.length);
+          rows.push(outcome);
+        }
+        groups.push(g);
+      }
+      const rowCI = bootstrapCI(rows, mean, 2000, 0.05, 42);
+      const clusterCI = clusterBootstrapCI(
+        groups,
+        (idx) => mean(idx.map((i) => rows[i])),
+        2000,
+        0.05,
+        42,
+      );
+      const rowWidth = rowCI[1] - rowCI[0];
+      const clusterWidth = clusterCI[1] - clusterCI[0];
+      check(
+        `clustering widens a perfectly-correlated interval (${rowWidth.toFixed(3)} -> ${clusterWidth.toFixed(3)})`,
+        clusterWidth > rowWidth * 1.5,
+        `row ${JSON.stringify(rowCI)} cluster ${JSON.stringify(clusterCI)}`,
+      );
+      check("an empty group list yields no interval", clusterBootstrapCI([], () => 0.5)[0] === 0);
+    }
+
+    // Every ticker shape in the settlement record splits at the last dash.
+    check("threshold ticker", eventOf("KXBTCD-26AUG2621-T78899.99") === "KXBTCD-26AUG2621");
+    check("range ticker", eventOf("KXXRP-26AUG2621-B1.2345678") === "KXXRP-26AUG2621");
+    check("15-minute ticker", eventOf("KXBTC15M-26AUG271930-30") === "KXBTC15M-26AUG271930");
+    check("named outcome", eventOf("KXCRYPTOLEAD15M-26AUG272000-BTC") === "KXCRYPTOLEAD15M-26AUG272000");
+    check("a ticker with no dash is its own event", eventOf("SOLO") === "SOLO");
+
+    const grouped = groupByEvent(
+      [{ e: "A" }, { e: "B" }, { e: "A" }, { e: "A" }],
+      (r) => r.e,
+    );
+    check("rows collapse to their events", effectiveN(grouped) === 2);
+    check("group membership is preserved", grouped.some((g) => g.length === 3));
+
+    const row = (o: Partial<SkillRow>): SkillRow => ({
+      ticker: "T",
+      event: "E",
+      modelProb: 0.5,
+      marketProb: 0.5,
+      priceCents: 50,
+      yesAskCents: 50,
+      noAskCents: 50,
+      outcome: 0,
+      side: "no",
+      pnlCents: 0,
+      ...o,
+    });
+
+    {
+      // Eight of ten settle NO — the structural tilt this venue actually has.
+      const rows = [
+        ...Array.from({ length: 8 }, (_, i) => row({ ticker: `n${i}`, event: `e${i}`, outcome: 0 })),
+        ...Array.from({ length: 2 }, (_, i) => row({ ticker: `y${i}`, event: `f${i}`, outcome: 1 })),
+      ];
+      const base = dumbBaselines(rows, fee);
+      const no = base.find((x) => x.label === "always NO");
+      const yes = base.find((x) => x.label === "always YES");
+      check("always-NO hits at the universe's own tilt", no?.hitRate === 0.8);
+      check("always-YES is its complement", yes?.hitRate === 0.2);
+      check("the structurally favoured side pays more", (no?.pnlPerContract ?? 0) > (yes?.pnlPerContract ?? 0));
+    }
+
+    {
+      // Regression: baselines must each pay their OWN ask. Pricing NO as
+      // 100 - yesAsk hands it a free crossing of the spread on every row.
+      const wide = [row({ yesAskCents: 60, noAskCents: 55, outcome: 0 })];
+      const base = dumbBaselines(wide, () => 0);
+      const no = base.find((x) => x.label === "always NO");
+      check(
+        "always-NO pays the NO ask, not 100 minus the YES ask",
+        no?.pnlPerContract === 45,
+        `got ${no?.pnlPerContract}`,
+      );
+    }
+
+    {
+      const banded = [
+        row({ ticker: "a", event: "e1", priceCents: 10, yesAskCents: 10, noAskCents: 92 }),
+        row({ ticker: "b", event: "e2", priceCents: 85, yesAskCents: 85, noAskCents: 17 }),
+      ];
+      const bands = withinBandSkill(banded, fee);
+      check("rows land in their own price band", bands.length === 2);
+      check("bands are labelled by entry price", bands.some((b) => b.band === "80-99c"));
+    }
+
+    {
+      // A model with real skill, but on only a handful of events, must not be
+      // allowed to claim anything.
+      const few = Array.from({ length: 40 }, (_, i) =>
+        row({
+          ticker: `t${i}`,
+          event: `e${i % 5}`,
+          modelProb: 0.95,
+          marketProb: 0.6,
+          outcome: 1,
+          side: "yes",
+          priceCents: 60,
+          yesAskCents: 60,
+          noAskCents: 42,
+          pnlCents: 39,
+        }),
+      );
+      const rep = skillReport(few, fee);
+      check("forty rows over five events counts five", rep.events === 5);
+      check("a thin sample is refused a verdict", rep.verdict.includes("Not enough independent events"));
+      check("the naive interval is narrower than the clustered one", rep.hitRateNaiveCI[0] >= rep.hitRateCI[0]);
+    }
+
+    {
+      // Same edge, spread across enough events to be worth believing.
+      const many = Array.from({ length: 60 }, (_, i) =>
+        row({
+          ticker: `t${i}`,
+          event: `e${i}`,
+          modelProb: 0.9,
+          marketProb: 0.6,
+          outcome: i % 10 === 0 ? 0 : 1,
+          side: "yes",
+          priceCents: 60,
+          yesAskCents: 60,
+          noAskCents: 42,
+          pnlCents: i % 10 === 0 ? -61 : 39,
+        }),
+      );
+      const rep = skillReport(many, fee);
+      check("sixty independent events are counted", rep.events === 60);
+      check("a genuinely better forecast scores positive skill", rep.skill > 0);
+      check("and clears significance", rep.significant, JSON.stringify(rep.skillCI));
+    }
+
+    {
+      // A model that merely reproduces the book must not be credited.
+      const parrot = Array.from({ length: 40 }, (_, i) =>
+        row({ ticker: `t${i}`, event: `e${i}`, modelProb: 0.7, marketProb: 0.7, outcome: i % 10 < 7 ? 1 : 0 }),
+      );
+      const rep = skillReport(parrot, fee);
+      check("copying the book scores zero skill", Math.abs(rep.skill) < 1e-9);
+      check("and is not significant", !rep.significant);
+    }
+
+    check("an empty report says so", skillReport([], fee).verdict.includes("No rows"));
+
+    check(
+      "a tag names asset, side, edge and time",
+      strategyTag({ asset: "btc", side: "yes", edgeCents: 3, minsLeft: 9 }) === "BTC_YES_e02-04_t05-15",
+    );
+    check(
+      "the top bucket is open-ended",
+      strategyTag({ asset: "ETH", side: "no", edgeCents: 40, minsLeft: 200 }) === "ETH_NO_e08+_t60+",
+    );
+
+    {
+      const tagged = [
+        { ...row({ ticker: "a", event: "e1", pnlCents: -10 }), tag: "LOSER" },
+        { ...row({ ticker: "b", event: "e2", pnlCents: -10 }), tag: "LOSER" },
+        { ...row({ ticker: "c", event: "e3", pnlCents: 20 }), tag: "WINNER" },
+      ];
+      const perf = tagPerformance(tagged);
+      check("the worst slice is reported first", perf[0].tag === "LOSER");
+      check("per-tag event counts are distinct", perf[0].events === 2);
+    }
+  }
+
+  // ------------------------------------------------------- sizing: Kelly, gated
+  {
+    section("Sizing — Kelly, with the safety catch welded on");
+
+    const report = (o: Partial<SkillReport>): SkillReport => ({
+      n: 200,
+      events: 60,
+      hitRate: 0.7,
+      hitRateCI: [0.6, 0.8],
+      hitRateNaiveCI: [0.65, 0.75],
+      brierModel: 0.08,
+      brierMarket: 0.10,
+      skill: 0.2,
+      skillCI: [0.1, 0.3],
+      pnlPerContract: 3,
+      baselines: [],
+      bands: [],
+      significant: true,
+      verdict: "ok",
+      ...o,
+    });
+
+    const proven = report({ skillCI: [0.4, 0.6] });
+    const modest = report({ skillCI: [0.1, 0.3] });
+    const thin = report({ events: 5 });
+    const unproven = report({ skillCI: [-0.05, 0.4], significant: false });
+
+    check("a thin sample earns no shrink factor", shrinkFactor(thin) === 0);
+    check("an interval touching zero earns none either", shrinkFactor(unproven) === 0);
+    check("a proven model gets its clustered lower bound", shrinkFactor(modest) === 0.1);
+    check("belief is capped at half the distance", shrinkFactor(report({ skillCI: [0.9, 0.99] })) === 0.5);
+
+    check("zero shrink returns the market's own number", shrinkProb(0.99, 0.7, 0) === 0.7);
+    check("full shrink returns the model's", shrinkProb(0.99, 0.7, 1) === 0.99);
+    check("half shrink lands between", Math.abs(shrinkProb(0.9, 0.7, 0.5) - 0.8) < 1e-9);
+
+    check("Kelly is zero when the price already exceeds belief", kellyFraction(0.5, 0.6) === 0);
+    check("Kelly rises with the edge", kellyFraction(0.8, 0.5) > kellyFraction(0.6, 0.5));
+    check("Kelly refuses a degenerate price", kellyFraction(0.9, 1) === 0);
+
+    // 80c ask, 2c one-lot fee, model 17 points above the book.
+    const base = {
+      modelProb: 0.97,
+      marketProb: 0.80,
+      priceCents: 80,
+      bankrollCents: 100_000,
+    };
+
+    {
+      const r = sizePosition({ ...base, report: thin });
+      check("an unmeasured model is sized at zero", r.contracts === 0);
+      check("and is told exactly why", r.reason.includes("unproven"), r.reason);
+    }
+    {
+      const r = sizePosition({ ...base, report: unproven });
+      check("a model that has not beaten the book is sized at zero", r.contracts === 0);
+      check("and the reason names the interval", r.reason.includes("includes zero"), r.reason);
+    }
+    {
+      const r = sizePosition({ ...base, report: proven });
+      check("a proven model gets a position", r.contracts > 0, r.reason);
+      check("sized off the shrunken probability, not the model's", r.usedProb < base.modelProb);
+      check("which still beats the price", r.usedProb > base.marketProb);
+      check("and never exceeds the position cap", r.costCents <= 0.05 * base.bankrollCents + 82);
+    }
+    {
+      // The conservatism is deliberate and worth pinning down: a model with
+      // ordinary measured skill, disagreeing by seventeen points, still does
+      // not clear an 80c ask. Shrinkage is what stops a confident model from
+      // sizing as though its confidence were established.
+      const r = sizePosition({ ...base, report: modest });
+      check("ordinary skill will not carry a rich price", r.contracts === 0, r.reason);
+      check("and the reason shows the shrink", r.reason.includes("shrunk"), r.reason);
+    }
+    {
+      // The fee lives inside the cost. At 85c the one-lot fee is a full cent,
+      // and an edge that clears the floor before the fee must not clear it
+      // after: 87.5c shrunk against an 85c ask is 2.5c gross and 1.5c net.
+      const feeAt85 = oneLotFeeCents(85, "cent");
+      const r = sizePosition({
+        modelProb: 0.90,
+        marketProb: 0.85,
+        priceCents: 85,
+        bankrollCents: 100_000,
+        report: proven,
+        minEdgeCents: 2,
+      });
+      check(`the fee is charged inside the edge (${feeAt85}c at 85c)`, feeAt85 === 1);
+      check(
+        "a marginal edge does not survive the fee",
+        r.contracts === 0 && r.reason.includes("below the"),
+        r.reason,
+      );
+      check("the gross edge would have cleared", r.netEdgeCents + feeAt85 >= 2);
+    }
+    {
+      const wide = sizePosition({ ...base, report: proven, spreadCents: 9 });
+      check("a wide spread is refused", wide.contracts === 0);
+      check("and says so", wide.reason.includes("Spread"), wide.reason);
+
+      const thinBook = sizePosition({ ...base, report: proven, volume: 10 });
+      check("a market with no exit is refused", thinBook.contracts === 0);
+      check("and says so", thinBook.reason.includes("Volume"), thinBook.reason);
+    }
+    {
+      // The position cap would mask the haircut at the default 5%, so this
+      // raises it until Kelly rather than the cap is what binds.
+      const loose = { ...base, report: proven, maxPositionPct: 0.5 };
+      const full = sizePosition({ ...loose, volume: 100_000 });
+      const haircut = sizePosition({ ...loose, volume: 600 });
+      check("a thin-but-passable market is flagged", haircut.liquidityAdjusted);
+      check("a deep one is not", !full.liquidityAdjusted);
+      check(
+        "and the haircut actually shrinks the position",
+        haircut.contracts < full.contracts && haircut.contracts > 0,
+        `${haircut.contracts} vs ${full.contracts}`,
+      );
+    }
+    {
+      const broke = sizePosition({ ...base, report: proven, bankrollCents: 0 });
+      check("no bankroll means no position", broke.contracts === 0);
+      check("and says which gate closed", broke.reason.includes("bankroll"), broke.reason);
     }
   }
 
