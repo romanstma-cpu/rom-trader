@@ -236,6 +236,61 @@ export interface TapeInfo {
   lastTs: number | null;
 }
 
+/** The underlying's own price, which every fair-value question needs. */
+export interface SpotInfo {
+  exists: boolean;
+  points: number;
+  assets: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+/** What is resting behind the quote, as opposed to what it costs. */
+export interface DepthInfo {
+  exists: boolean;
+  points: number;
+  markets: number;
+  bytes: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+/** One entry-price band of the calibration study. */
+export interface CalibrationBand {
+  label: string;
+  n: number;
+  events: number;
+  meanQuote: number;
+  realised: number;
+  gapPp: number;
+  realisedCI: [number, number];
+  buyYes: number;
+  buyYesCI: [number, number];
+  buyNo: number;
+  buyNoCI: [number, number];
+}
+
+/**
+ * Does a price on this venue mean what it says, and is any error big enough to
+ * trade? Computed on the user's own recording, with event-clustered intervals.
+ */
+export interface CalibrationReport {
+  markets: number;
+  events: number;
+  horizonMinutes: number;
+  yesRate: number;
+  bands: CalibrationBand[];
+  tradeable: string[];
+  suppressed: string[];
+  verdict: string;
+}
+
+export interface CalibrationProgressEvent {
+  file: string;
+  index: number;
+  total: number;
+}
+
 /**
  * OpenRouter status. Deliberately carries a hint and never the key — the vault
  * has no read path to the renderer, exactly like the Kalshi credentials.
@@ -383,6 +438,12 @@ export interface RomApi {
     clear: () => Promise<RecordingInfo>;
     sweep: () => Promise<SweepReport>;
     onSweepProgress: (cb: (p: SweepProgress) => void) => () => void;
+    spot: () => Promise<SpotInfo>;
+    depth: () => Promise<DepthInfo>;
+  };
+  research: {
+    calibrate: (horizonMinutes: number) => Promise<CalibrationReport>;
+    onProgress: (cb: (p: CalibrationProgressEvent) => void) => () => void;
   };
   ai: {
     status: () => Promise<AiStatus>;

@@ -24,6 +24,7 @@ import {
 import { clearTape, keepTrades, nextPollFrom, recordTrades, tapeInfo } from "./engine/tape";
 import { clearSpot, spotInfo, sweepSpot } from "./engine/spot";
 import { clearDepth, depthInfo, sweepDepth } from "./engine/depth";
+import { runCalibration } from "./engine/calibration";
 import {
   FREE_MODELS,
   aiStatus,
@@ -633,6 +634,35 @@ function registerIpc(): void {
       );
     } finally {
       sweepRunning = false;
+    }
+  });
+
+  /**
+   * The calibration study, run on the user's own recording.
+   *
+   * Everything this project has learned lived in `scripts/` until now, which
+   * means it was available to whoever cloned the repo and to nobody who
+   * downloaded the installer. This is the first study to move inside, and it
+   * needs no key and no network — only the quotes the sweep already records and
+   * the outcomes the settlement sweeper already collects.
+   *
+   * Guarded against re-entry like the parameter sweep: two passes over a
+   * multi-gigabyte recording at once is how a trading process runs out of
+   * memory while holding a position.
+   */
+  let calibrating = false;
+  ipcMain.handle("research:calibrate", async (_e, horizonMinutes: unknown) => {
+    if (calibrating) throw new Error("A study is already running.");
+    const horizon = typeof horizonMinutes === "number" && Number.isFinite(horizonMinutes)
+      ? Math.min(Math.max(Math.round(horizonMinutes), 1), 240)
+      : 30;
+    calibrating = true;
+    try {
+      return await runCalibration(horizon, (p) =>
+        sendToRenderer("research:progress", p),
+      );
+    } finally {
+      calibrating = false;
     }
   });
 

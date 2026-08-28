@@ -61,6 +61,10 @@ const api = {
     sweep: () => ipcRenderer.invoke("backtest:sweep"),
     onSweepProgress: (cb: (p: unknown) => void) => on("sweep:progress", cb),
   },
+  research: {
+    calibrate: (horizonMinutes: number) => ipcRenderer.invoke("research:calibrate", horizonMinutes),
+    onProgress: (cb: (p: unknown) => void) => on("research:progress", cb),
+  },
   ai: {
     status: () => ipcRenderer.invoke("ai:status"),
     models: () => ipcRenderer.invoke("ai:models"),
