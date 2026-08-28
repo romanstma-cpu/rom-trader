@@ -170,10 +170,18 @@ export function clusterBootstrapCI(
 /**
  * The event a market belongs to.
  *
- * Kalshi market tickers are `EVENT-OUTCOME`, and across all forty ticker
- * shapes in this app's settlement record the outcome segment never contains a
- * dash — strikes carry a decimal point instead (`T78899.99`, `B1.2345678`).
- * So the last dash is the boundary.
+ * Kalshi market tickers are `SERIES-EVENT-OUTCOME`, and the outcome segment
+ * never contains a dash — strikes carry a decimal point instead (`T78899.99`,
+ * `B1.2345678`). So the last dash is the boundary. Audited over every ticker
+ * this app has ever written down — 5,523 of them across 119 series, the
+ * settlement record and both scan logs — and all 5,523 have exactly three
+ * segments. Nothing in the record can collapse to its series, which is the
+ * only way this rule could merge two events that are genuinely separate.
+ *
+ * This is also the engine's risk boundary: `TradingEngine.eventOf` calls
+ * straight through, so the ladder cap, the loss lockout and every study built
+ * on `groupByEvent` cannot drift apart. They did drift, from 1.10.0 until this
+ * change — see the comment on `TradingEngine.eventOf` for what that cost.
  */
 export function eventOf(ticker: string): string {
   const i = ticker.lastIndexOf("-");

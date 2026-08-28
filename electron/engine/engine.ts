@@ -1,6 +1,9 @@
 import * as crypto from "node:crypto";
 import type { Credentials } from "./credentials";
 import { KalshiApiError, KalshiClient, KalshiMarket } from "./kalshi";
+// Aliased on import so the static below reads as delegation rather than
+// recursion, and so nothing inside this file can reach for the bare name.
+import { eventOf as eventLadderOf } from "./skill";
 import {
   netEdgeCents,
   roundTripFeeCentsPerContract,
@@ -249,7 +252,19 @@ export class TradingEngine {
    */
   private priceHistory = new Map<string, MarketSample[]>();
   private cooldownUntil = new Map<string, number>(); // ticker -> ms timestamp
-  private eventLockoutUntil = new Map<string, number>(); // event ladder -> ms timestamp
+  /**
+   * Event ladder -> when its lockout lifts, and which market earned it.
+   *
+   * The losing ticker is carried because the signal has to be able to say
+   * whether the stop happened here or next door, and it can no longer infer
+   * that from the ticker. Under the old strike-suffix rule a market that was
+   * its own event kept its whole ticker as the event key, so `eventOf(t) === t`
+   * meant "no siblings"; under the last-dash rule every real Kalshi ticker
+   * loses its outcome segment, so that test is true only for the dashless
+   * tickers that exist in tests. Left alone it would have quietly relabelled
+   * every ordinary lockout as a sibling's fault.
+   */
+  private eventLockoutUntil = new Map<string, { until: number; lostTicker: string }>();
   /**
    * The scan clock: the current tick's own timestamp, set at the top of
    * tick() live and by the replay driver for every recorded scan. Everything
@@ -297,15 +312,32 @@ export class TradingEngine {
   private static readonly LOSS_LOCKOUT_MS = 60 * 60_000;
 
   /**
-   * The event ladder a strike ticker belongs to: KXBTCD-26AUG2420-T78699.99
-   * and KXBTCD-26AUG2420-T78799.99 are both KXBTCD-26AUG2420. Sibling strikes
-   * price the same underlying at different lines, so they move together — a
-   * fact the ledger, the cooldowns and the losing-streak brake all need.
-   * Tickers without a strike suffix are their own event.
+   * The event ladder a market belongs to: KXBTCD-26AUG2420-T78699.99 and
+   * KXBTCD-26AUG2420-T78799.99 are both KXBTCD-26AUG2420. Siblings settle on
+   * one outcome, so they move together — a fact the ledger, the cooldowns and
+   * the losing-streak brake all need.
+   *
+   * This used to strip a `-T…`/`-B…` strike suffix and nothing else, which
+   * quietly under-grouped every series whose outcome segment is not a strike.
+   * Measured over the settlement record, that left nine series where
+   * siblings shared an event and the engine saw one event per market:
+   * KXCRYPTOLEAD15M (five mutually exclusive "which coin leads" outcomes),
+   * KXDJI, KXAPRPOTUSD and KXYTVIEWSW (strike ladders whose lines are bare
+   * numbers — `53190.00`, `39.1`, `14.5M`), the football series (home / away /
+   * tie) and KXCBDECISIONKOREA. On those, `maxPositionsPerEvent` and the
+   * ladder lockout never fired at all, so the engine could stack the exact
+   * correlated cascade the 1.10.0 cap was added to stop — and the recorded
+   * scans are full of them: 886 of 3,950 in the live log, 1,088 of 5,607 in
+   * the archive, held up to nine siblings deep.
+   *
+   * So it now shares `skill.eventOf`, which splits at the last dash. One
+   * definition for the risk limits and for every study that reports how many
+   * independent events a result rests on; two definitions is how they came to
+   * disagree in the first place. Broadening only ever refuses entries, never
+   * creates one. Tickers with no dash remain their own event.
    */
   static eventOf(ticker: string): string {
-    const i = ticker.search(/-[TB][\d.]+$/);
-    return i > 0 ? ticker.slice(0, i) : ticker;
+    return eventLadderOf(ticker);
   }
 
   /**
@@ -849,17 +881,20 @@ export class TradingEngine {
     return true;
   }
 
-  /** Milliseconds this ticker's event ladder stays locked after a sibling's loss. */
-  private eventLockRemaining(ticker: string): number {
+  /**
+   * How long this ticker's event ladder stays shut after a loss on it, and
+   * which market took that loss. Zero milliseconds means the ladder is open.
+   */
+  private eventLockRemaining(ticker: string): { ms: number; lostTicker: string } {
     const ev = TradingEngine.eventOf(ticker);
-    const until = this.eventLockoutUntil.get(ev);
-    if (until === undefined) return 0;
-    const left = until - this.now();
+    const lock = this.eventLockoutUntil.get(ev);
+    if (lock === undefined) return { ms: 0, lostTicker: "" };
+    const left = lock.until - this.now();
     if (left <= 0) {
       this.eventLockoutUntil.delete(ev);
-      return 0;
+      return { ms: 0, lostTicker: "" };
     }
-    return left;
+    return { ms: left, lostTicker: lock.lostTicker };
   }
 
   /** Open positions plus resting orders on this ticker's event ladder. */
@@ -1038,7 +1073,7 @@ export class TradingEngine {
       let eligible = false;
       let reason: string;
       let autocorr: number | null = null;
-      let evLockMs = 0;
+      let evLock = { ms: 0, lostTicker: "" };
 
       if (!clockAllows) {
         // Checked first so that outside the window every market says the same
@@ -1154,15 +1189,20 @@ export class TradingEngine {
         const secs = Math.ceil(((this.cooldownUntil.get(m.ticker) ?? 0) - this.now()) / 1000);
         reason = `cooling down for ${secs}s after exiting`;
         stats.skippedCooldown++;
-      } else if ((evLockMs = this.eventLockRemaining(m.ticker)) > 0) {
+      } else if ((evLock = this.eventLockRemaining(m.ticker)).ms > 0) {
         // A stop-out on one strike is the underlying disproving the move, and
         // every sibling strike prices the same underlying. The engine used to
         // honour the loss lockout on the exact ticker that lost while buying
         // the strike next door 45 seconds later — same ladder, same dip, same
         // stop. One disproof per ladder, not per line on it.
-        const mins = Math.ceil(evLockMs / 60_000);
+        //
+        // Which of the two it was comes from the lock itself rather than from
+        // the shape of the ticker: since the ladder is now the last-dash event,
+        // a market always differs from its event key and the old test would
+        // have blamed a sibling for every loss the market took itself.
+        const mins = Math.ceil(evLock.ms / 60_000);
         reason =
-          TradingEngine.eventOf(m.ticker) === m.ticker
+          evLock.lostTicker === m.ticker
             ? `locked out for ${mins}m after losing here`
             : `its ladder stopped out — locked for ${mins}m after losing there`;
         stats.skippedEvent++;
@@ -1609,10 +1649,10 @@ export class TradingEngine {
         // for every sibling too. Winning exits keep the short ticker-scoped
         // cooldown — strength continuing into the next strike is a different
         // claim — and a zero cooldown still disables both.
-        this.eventLockoutUntil.set(
-          TradingEngine.eventOf(p.ticker),
-          this.now() + TradingEngine.LOSS_LOCKOUT_MS,
-        );
+        this.eventLockoutUntil.set(TradingEngine.eventOf(p.ticker), {
+          until: this.now() + TradingEngine.LOSS_LOCKOUT_MS,
+          lostTicker: p.ticker,
+        });
       } else {
         this.cooldownUntil.set(p.ticker, this.now() + this.settings.reentryCooldownSeconds * 1000);
       }

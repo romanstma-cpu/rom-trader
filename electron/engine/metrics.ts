@@ -126,14 +126,13 @@ export function computeMetrics(
   // Group by event ladder, not by ticker, so every rung of one BTC hour
   // collapses to a single unit of evidence.
   //
-  // Deliberately `skill.eventOf` (split at the last dash) rather than
-  // `TradingEngine.eventOf` (strip a `-T…`/`-B…` strike suffix). The two agree
-  // on the crypto threshold ladders and disagree on series whose outcome
-  // segment is not a strike — KXCRYPTOLEAD15M has up to five siblings per
-  // event that the engine's rule reads as five separate events. For MEASUREMENT
-  // the broader grouping is the correct one: those markets do resolve together,
-  // whatever the risk limits currently believe. The engine's own definition is
-  // a separate question, because widening it changes live behaviour.
+  // `skill.eventOf`, which is now also what `TradingEngine.eventOf` calls.
+  // It was not always: the engine used to strip a `-T…`/`-B…` strike
+  // suffix and nothing else, so a KXCRYPTOLEAD15M event with five siblings
+  // counted as five events to the risk limits and one here. Measurement was
+  // right and the limits were wrong; they now share the one definition, which
+  // is the only way "how many independent events is this?" can have a single
+  // answer for both the study and the engine being studied.
   const groups = groupByEvent(history, (t) => eventOf(t.ticker));
   const decided = history.filter((t) => t.pnlUsd !== 0);
   let winRateCI: [number, number] | null = null;

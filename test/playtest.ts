@@ -1542,6 +1542,106 @@ reset();
   );
 }
 
+section("the ladder rules on real Kalshi ticker shapes");
+reset();
+{
+  // Every ticker below is copied out of settlements.jsonl. The section above
+  // proves the rules with tidy handwritten tickers, which is exactly how the
+  // gap survived three versions: `KXBTC-T50` carries the `-T…` suffix the old
+  // rule looked for, and almost nothing else does.
+  //
+  // KXCRYPTOLEAD15M is the sharpest case in the record. Its five outcomes are
+  // mutually exclusive — one coin leads the quarter-hour — so three positions
+  // in one lead market is a single bet at triple size that cannot pay out more
+  // than once. The cap never saw it: no strike suffix, so five markets read as
+  // five separate events.
+  const LEAD = "KXCRYPTOLEAD15M-26AUG272000-";
+  const lead = (n: number) => ["BTC", "ETH", "SOL"].map((c) => mkt(LEAD + c, n, n + 1));
+  let e = runEngine({}, [lead(40), lead(40), lead(40), lead(40), lead(45)]);
+  check(
+    "one position per lead market, not one per coin",
+    e.getState().positions.length === 1,
+    e.getState().positions.map((p) => p.ticker).join(",") || "no positions",
+  );
+  check(
+    "and the scanner counts the two it refused",
+    (e.getState().scanner?.skippedEvent ?? 0) >= 2,
+    `skippedEvent ${e.getState().scanner?.skippedEvent ?? 0}`,
+  );
+
+  // The other half of the rule, and the reason widening it was safe: adjacent
+  // quarter-hours are genuinely separate events and must all still trade.
+  // Each 15-minute market is the only rung on its own ladder — which is why
+  // the fourteen 15M series were unharmed by the old rule as well.
+  clearHistory();
+  const windows = (n: number) =>
+    ["26AUG271930-30", "26AUG271945-45", "26AUG272000-00"].map((w) =>
+      mkt(`KXBTC15M-${w}`, n, n + 1),
+    );
+  e = runEngine({}, [windows(40), windows(40), windows(40), windows(40), windows(45)]);
+  check(
+    "three separate 15-minute windows all enter",
+    e.getState().positions.length === 3,
+    e.getState().positions.map((p) => p.ticker).join(",") || "no positions",
+  );
+
+  // A stop on one coin shuts the whole lead market. Before the grouping was
+  // fixed the lockout was keyed on the full ticker, so a stopped-out BTC left
+  // ETH wide open — the same fifteen-minute race, re-entered on the same dip.
+  clearHistory();
+  const pair = (btc: [number, number], eth: [number, number]) => [
+    mkt(LEAD + "BTC", btc[0], btc[1]),
+    mkt(LEAD + "ETH", eth[0], eth[1]),
+  ];
+  e = runEngine({}, [
+    pair([40, 41], [40, 41]), pair([40, 41], [40, 41]), pair([40, 41], [40, 41]),
+    pair([40, 41], [40, 41]), pair([45, 46], [45, 46]),
+    pair([30, 31], [45, 46]), // BTC crashes through its stop
+    pair([30, 31], [52, 53]), // ETH puts in fresh momentum right behind it
+  ]);
+  check("a sibling coin's loss shuts the whole lead market", e.getState().positions.length === 0);
+  check(
+    "and the signal blames the ladder",
+    e.getSignals().some((s) => s.reason.includes("ladder stopped out")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+
+  // A market that lost on its own line must still be told so. The lockout is
+  // keyed on the event, and under the last-dash rule every real ticker differs
+  // from its event key — so working out "was it me, or next door?" from the
+  // shape of the ticker would blame an imaginary sibling for every ordinary
+  // stop-out. The lock carries the losing ticker instead.
+  clearHistory();
+  const solo = (bid: number, ask: number) => [mkt("KXBTC15M-26AUG271930-30", bid, ask)];
+  e = runEngine({}, [
+    solo(40, 41), solo(40, 41), solo(40, 41), solo(40, 41), solo(45, 46),
+    solo(30, 31), solo(30, 31), solo(30, 31), solo(35, 36),
+  ]);
+  check("the re-signal after its own loss is refused", e.getState().positions.length === 0);
+  check(
+    "a market that lost on its own line is told so",
+    e.getSignals().some((s) => s.reason.includes("after losing here")),
+    e.getSignals()[0]?.reason ?? "no signals",
+  );
+  check(
+    "— and not blamed on a sibling it does not have",
+    !e.getSignals().some((s) => s.reason.includes("ladder stopped out")),
+    e.getSignals().find((s) => s.reason.includes("ladder stopped out"))?.reason ?? "",
+  );
+
+  // The bare-number strike ladders the old rule also missed: KXDJI lines are
+  // written `53190.00`, with no T or B in front of them.
+  clearHistory();
+  const dji = (n: number) =>
+    ["53190.00", "53270.00", "53285.00"].map((k) => mkt(`KXDJI-26AUG2410-${k}`, n, n + 1));
+  e = runEngine({}, [dji(40), dji(40), dji(40), dji(40), dji(45)]);
+  check(
+    "bare-number index strikes are one ladder",
+    e.getState().positions.length === 1,
+    e.getState().positions.map((p) => p.ticker).join(",") || "no positions",
+  );
+}
+
 section("cooldowns run on the scan clock");
 reset();
 {
@@ -3176,11 +3276,60 @@ void (async () => {
     }
 
     // Every ticker shape in the settlement record splits at the last dash.
+    // These are copied verbatim out of settlements.jsonl rather than invented:
+    // the point of the rule is that it survives shapes nobody anticipated, and
+    // a made-up ticker cannot test that.
     check("threshold ticker", eventOf("KXBTCD-26AUG2621-T78899.99") === "KXBTCD-26AUG2621");
     check("range ticker", eventOf("KXXRP-26AUG2621-B1.2345678") === "KXXRP-26AUG2621");
     check("15-minute ticker", eventOf("KXBTC15M-26AUG271930-30") === "KXBTC15M-26AUG271930");
     check("named outcome", eventOf("KXCRYPTOLEAD15M-26AUG272000-BTC") === "KXCRYPTOLEAD15M-26AUG272000");
     check("a ticker with no dash is its own event", eventOf("SOLO") === "SOLO");
+    // The shapes the old strike-suffix rule could not see: a bare-number
+    // strike, a decimal one, a suffixed one, a three-way football outcome and
+    // a policy decision. All of them siblings; none of them `-T…`/`-B…`.
+    check("bare-number index strike", eventOf("KXDJI-26AUG2410-53190.00") === "KXDJI-26AUG2410");
+    check("decimal approval strike", eventOf("KXAPRPOTUSD-26AUG24-39.1") === "KXAPRPOTUSD-26AUG24");
+    check("suffixed view-count strike", eventOf("KXYTVIEWSW-TAY26AUG23-14.7M") === "KXYTVIEWSW-TAY26AUG23");
+    check("football outcome", eventOf("KXMYSLGAME-26AUG22NEGKUA-TIE") === "KXMYSLGAME-26AUG22NEGKUA");
+    check("policy outcome", eventOf("KXCBDECISIONKOREA-26AUG26-HOLD") === "KXCBDECISIONKOREA-26AUG26");
+
+    {
+      // One definition, two callers. The engine's risk limits and every study
+      // that reports an event count must not be able to disagree about what an
+      // event is — they did for three versions, and the ladder cap silently
+      // did nothing on nine series as a result.
+      const shapes = [
+        "KXBTCD-26AUG2621-T78899.99",
+        "KXXRP-26AUG2621-B1.2345678",
+        "KXBTC15M-26AUG271930-30",
+        "KXCRYPTOLEAD15M-26AUG272000-BTC",
+        "KXDJI-26AUG2410-53190.00",
+        "KXAPRPOTUSD-26AUG24-39.1",
+        "KXYTVIEWSW-TAY26AUG23-14.7M",
+        "KXMYSLGAME-26AUG22NEGKUA-TIE",
+        "KXCBDECISIONKOREA-26AUG26-HOLD",
+        "KXRT-MUT-50",
+        "SOLO",
+      ];
+      check(
+        "the engine groups markets exactly as the studies do",
+        shapes.every((t) => TradingEngine.eventOf(t) === eventOf(t)),
+        shapes.find((t) => TradingEngine.eventOf(t) !== eventOf(t)) ?? "",
+      );
+      // Adjacent quarter-hours are genuinely separate events, and grouping
+      // must not swallow them: each 15M market is the only rung on its own
+      // ladder, so the cap has nothing to refuse there.
+      check(
+        "adjacent 15-minute windows stay separate events",
+        TradingEngine.eventOf("KXBTC15M-26AUG271930-30") !==
+          TradingEngine.eventOf("KXBTC15M-26AUG271945-45"),
+      );
+      check(
+        "but the five coins of one lead market share theirs",
+        TradingEngine.eventOf("KXCRYPTOLEAD15M-26AUG272000-BTC") ===
+          TradingEngine.eventOf("KXCRYPTOLEAD15M-26AUG272000-SOL"),
+      );
+    }
 
     const grouped = groupByEvent(
       [{ e: "A" }, { e: "B" }, { e: "A" }, { e: "A" }],
