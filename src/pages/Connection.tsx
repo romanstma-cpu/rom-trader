@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CredentialStatus, Settings, TestResult } from "../types";
-import { Confirm, Field, Toggle, useToast } from "../ui";
+import { AiKeyCard, Confirm, Field, KalshiSignup, Toggle, useToast } from "../ui";
 
 export default function Connection({ onChanged }: { onChanged: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -111,6 +111,11 @@ export default function Connection({ onChanged }: { onChanged: () => void }) {
       )}
       {cred.error && <div className="notice warn">{cred.error}</div>}
 
+      {/* Only for someone who has not connected an account yet. Shown to a
+          configured user it would be an advert for something they already own,
+          which is how a useful pointer turns into noise. */}
+      {!hasKeys && <KalshiSignup />}
+
       <div className="card">
         <div className="card-head">
           <div className="label">Kalshi credentials</div>
@@ -201,6 +206,11 @@ export default function Connection({ onChanged }: { onChanged: () => void }) {
           </div>
         )}
       </div>
+
+      {/* Second key, second vault. Placed after the Kalshi card because keys
+          belong together, and well away from the live-mode switch — one of
+          these can move money and the other writes prose. */}
+      <AiKeyCard />
 
       <div className="card">
         <div className="card-head">

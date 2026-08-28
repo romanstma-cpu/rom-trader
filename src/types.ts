@@ -210,6 +210,54 @@ export interface RecordingInfo {
   lastTs: number | null;
 }
 
+/**
+ * Progress collecting what markets actually settled at, which the quote
+ * recording cannot say. `pending` counts markets seen and not yet resolved;
+ * `due` counts the subset already past their close and being asked about.
+ */
+export interface SettlementInfo {
+  settled: number;
+  pending: number;
+  due: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+/**
+ * Recorded prints. Quotes say what was on offer; only these say what was
+ * taken, which is the difference between guessing and measuring whether a
+ * resting order would have filled.
+ */
+export interface TapeInfo {
+  exists: boolean;
+  trades: number;
+  bytes: number;
+  firstTs: number | null;
+  lastTs: number | null;
+}
+
+/**
+ * OpenRouter status. Deliberately carries a hint and never the key — the vault
+ * has no read path to the renderer, exactly like the Kalshi credentials.
+ */
+export interface AiStatus {
+  configured: boolean;
+  keyHint: string;
+  model: string;
+  encryptionAvailable: boolean;
+  error: string | null;
+}
+
+export interface NarrationInput {
+  subject: string;
+  summary: string;
+  evidence: { label: string; value: string }[];
+}
+
+export type NarrationResult =
+  | { ok: true; text: string; model: string }
+  | { ok: false; text: string; reason: string };
+
 export interface PerformanceMetrics {
   trades: number;
   wins: number;
@@ -329,16 +377,28 @@ export interface RomApi {
   };
   backtest: {
     info: () => Promise<RecordingInfo>;
+    settlements: () => Promise<SettlementInfo>;
+    tape: () => Promise<TapeInfo>;
     run: () => Promise<BacktestResult[]>;
     clear: () => Promise<RecordingInfo>;
     sweep: () => Promise<SweepReport>;
     onSweepProgress: (cb: (p: SweepProgress) => void) => () => void;
+  };
+  ai: {
+    status: () => Promise<AiStatus>;
+    models: () => Promise<{ id: string; label: string }[]>;
+    save: (apiKey: string, model: string) => Promise<AiStatus>;
+    clear: () => Promise<AiStatus>;
+    narrate: (input: NarrationInput) => Promise<NarrationResult>;
   };
   app: {
     version: () => Promise<string>;
     dataDir: () => Promise<string>;
     openDataFolder: () => Promise<string>;
     openMarket: (ticker: string) => Promise<void>;
+    /** ROM's Kalshi sign-up link, or null when no referral code is configured. */
+    referral: () => Promise<string | null>;
+    openReferral: () => Promise<void>;
     /** Clears results and halts; keeps keys, settings, setups and recordings. */
     resetTradingData: () => Promise<TradeRecord[]>;
     factoryReset: () => Promise<Settings>;

@@ -16,6 +16,9 @@ scripts/replay.js
 scripts/edge.js
 scripts/optimize.js
 scripts/validate.js
+scripts/arb.js
+scripts/passive.js
+scripts/settle.js
 
 # local editor / OS noise
 .vscode/

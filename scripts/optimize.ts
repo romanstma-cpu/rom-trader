@@ -104,6 +104,14 @@ const AXES = {
   takeProfitCents: [12, 20, 30, 40],
   stopLossCents: [8, 12, 20, 30],
   maxSpreadCents: [1, 2],
+  // Both sides passive. A maker entry pays no fee to open and a resting
+  // take-profit fills at the target fee-free, so on this axis a winner costs
+  // nothing at all and only a stop pays the taker rate. That moves the
+  // break-even from 57% of decided races to about 42% — and the measured
+  // maker win rate inside the 60-75c band is 58%. It is the one combination
+  // the earlier searches never crossed with the price band, because they
+  // pinned makerExits to false.
+  makerExits: [false, true],
 };
 
 function candidates(): Candidate[] {
@@ -112,30 +120,34 @@ function candidates(): Candidate[] {
     for (const takeProfitCents of AXES.takeProfitCents) {
       for (const stopLossCents of AXES.stopLossCents) {
         for (const maxSpreadCents of AXES.maxSpreadCents) {
-          const [minPriceCents, maxPriceCents] = BANDS[band];
-          out.push({
-            label: `${band}c tp${takeProfitCents} sl${stopLossCents} spr${maxSpreadCents}`,
-            axes: { band, takeProfitCents, stopLossCents, maxSpreadCents },
-            settings: {
-              ...BASE,
-              band: undefined,
-              minPriceCents,
-              maxPriceCents,
-              takeProfitCents,
-              stopLossCents,
-              maxSpreadCents,
-              // Fixed at what the previous run's marginals preferred, so this
-              // run varies one new axis against a settled background rather
-              // than searching everything at once and finding noise.
-              momentumThresholdCents: 3,
-              makerEntries: true,
-              minMinutesToClose: 30,
-              makerTtlTicks: 6,
-              makerExits: false,
-              minNetEdgeCents: DEFAULT_SETTINGS.minNetEdgeCents,
-              regimeFilterEnabled: true,
-            } as Settings,
-          });
+          for (const makerExits of AXES.makerExits) {
+            const [minPriceCents, maxPriceCents] = BANDS[band];
+            out.push({
+              label:
+                `${band}c tp${takeProfitCents} sl${stopLossCents} spr${maxSpreadCents}` +
+                (makerExits ? " mkTP" : ""),
+              axes: { band, takeProfitCents, stopLossCents, maxSpreadCents, makerExits },
+              settings: {
+                ...BASE,
+                band: undefined,
+                minPriceCents,
+                maxPriceCents,
+                takeProfitCents,
+                stopLossCents,
+                maxSpreadCents,
+                makerExits,
+                // Fixed at what the previous run's marginals preferred, so this
+                // run varies the new axes against a settled background rather
+                // than searching everything at once and finding noise.
+                momentumThresholdCents: 3,
+                makerEntries: true,
+                minMinutesToClose: 30,
+                makerTtlTicks: 6,
+                minNetEdgeCents: DEFAULT_SETTINGS.minNetEdgeCents,
+                regimeFilterEnabled: true,
+              } as Settings,
+            });
+          }
         }
       }
     }

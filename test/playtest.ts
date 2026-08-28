@@ -13,7 +13,28 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TradingEngine } from "../electron/engine/engine";
-import { KalshiApiError, KalshiClient } from "../electron/engine/kalshi";
+import {
+  KalshiApiError,
+  KalshiClient,
+  type KalshiMarket,
+  type KalshiTrade,
+} from "../electron/engine/kalshi";
+import {
+  DEFAULT_MODEL,
+  FREE_MODELS,
+  aiStatus,
+  looksLikeKey,
+  unsupportedNumbers,
+} from "../electron/engine/ai";
+import {
+  clearTape,
+  keepTrades,
+  loadTape,
+  loadTapeState,
+  nextPollFrom,
+  recordTrades,
+  tapeInfo,
+} from "../electron/engine/tape";
 import { STRATEGIES, findStrategy } from "../electron/engine/strategies";
 import {
   DEFAULT_SETTINGS,
@@ -51,12 +72,34 @@ import { compareStrategies, runBacktest } from "../electron/engine/backtest";
 import { runSweep } from "../electron/engine/sweep";
 import {
   breakEvenWinRate,
+  makerFeeCentsPerContract,
+  makerFeeUsd,
+  makerRate,
+  minEfficientOrderSize,
   netEdgeCents,
+  restAndSettleEdgeCents,
   roundTripFeeCentsPerContract,
   roundTripFeeUsd,
+  settleBreakEvenPct,
   takerFeeCentsPerContract,
   takerFeeUsd,
 } from "../electron/engine/fees";
+import {
+  MAX_TRIES,
+  SETTLE_GRACE_MS,
+  addPending,
+  appendSettlement,
+  clearSettlements,
+  duePending,
+  isSettled,
+  loadPending,
+  loadSettlements,
+  prunePending,
+  savePending,
+  settlementInfo,
+  sweepSettlements,
+  type PendingMap,
+} from "../electron/engine/settlements";
 import { computeMetrics } from "../electron/engine/metrics";
 import { splitAtGaps, sampledMs, CONTINUOUS_GAP_MS } from "../electron/engine/series";
 import { lag1Autocorrelation } from "../electron/engine/engine";
@@ -1766,6 +1809,334 @@ reset();
   );
 }
 
+// ------------------------------------------------------------- maker fees
+
+section("the maker side is free, and the code has to know it");
+{
+  // The whole rest-and-settle case rests on this number being zero rather
+  // than merely small, so it is asserted rather than commented.
+  check(
+    "a quadratic series charges makers nothing",
+    makerFeeUsd(100, 50, "quadratic") === 0,
+    `${makerFeeUsd(100, 50, "quadratic")}`,
+  );
+  check(
+    "...at every price, not just the middle",
+    [5, 25, 50, 75, 85, 95].every((p) => makerFeeUsd(500, p, "quadratic") === 0),
+  );
+  check("...and the taker side still is not", takerFeeUsd(100, 50) > 1.7);
+
+  // Series that do charge makers must charge the published fraction.
+  const takerMid = takerFeeUsd(1000, 50);
+  const makerMid = makerFeeUsd(1000, 50, "quadratic_with_maker_fees");
+  check(
+    "a maker-fee series charges a quarter of the taker rate",
+    Math.abs(makerMid / takerMid - 0.25) < 0.01,
+    `${makerMid} vs ${takerMid}`,
+  );
+  const comboMid = makerFeeUsd(1000, 50, "quadratic_with_combo_maker_fees");
+  check(
+    "the combo tier charges half",
+    Math.abs(comboMid / takerMid - 0.5) < 0.01,
+    `${comboMid} vs ${takerMid}`,
+  );
+
+  // The one mistake this file must never make is inventing a zero.
+  check(
+    "an unknown fee_type falls back to the full taker rate",
+    makerRate("some_tier_invented_next_year") === makerRate("quadratic_with_maker_fees") * 4,
+  );
+  check(
+    "...so an unrecognised series is never treated as free",
+    makerFeeUsd(100, 50, "flat") > 0,
+    `${makerFeeUsd(100, 50, "flat")}`,
+  );
+
+  // Rounding precision decides whether small orders are viable at all.
+  check(
+    "centicent rounding is cheaper than cent rounding on one contract",
+    takerFeeUsd(1, 85, "centicent") < takerFeeUsd(1, 85, "cent"),
+    `${takerFeeUsd(1, 85, "centicent")} vs ${takerFeeUsd(1, 85, "cent")}`,
+  );
+  check(
+    "cent rounding makes a single contract cost a whole cent",
+    takerFeeUsd(1, 85, "cent") === 0.01,
+    `${takerFeeUsd(1, 85, "cent")}`,
+  );
+  check(
+    "a cent-rounded account needs a batch before the rate is honest",
+    minEfficientOrderSize(85, "cent") > 1,
+    `${minEfficientOrderSize(85, "cent")}`,
+  );
+  check("a centicent account does not", minEfficientOrderSize(85, "centicent") === 1);
+
+  // What a held-to-settlement position actually has to beat.
+  check(
+    "on a zero-maker series the bar is exactly the price paid",
+    settleBreakEvenPct(85, "quadratic") === 85,
+    `${settleBreakEvenPct(85, "quadratic")}`,
+  );
+  check(
+    "a maker-charging series raises the bar",
+    settleBreakEvenPct(85, "quadratic_with_maker_fees") > 85,
+    `${settleBreakEvenPct(85, "quadratic_with_maker_fees")}`,
+  );
+  check(
+    "buying an 85c favourite that lands 87% of the time earns two cents",
+    Math.abs(restAndSettleEdgeCents(85, 87) - 2) < 1e-9,
+    `${restAndSettleEdgeCents(85, 87)}`,
+  );
+  check(
+    "buying one that lands 83% of the time loses two",
+    restAndSettleEdgeCents(85, 83) < 0,
+    `${restAndSettleEdgeCents(85, 83)}`,
+  );
+  check("a maker execution on the ladders costs nothing per contract", makerFeeCentsPerContract(85) === 0);
+
+  // The comparison that motivated all of this: the same trade, taken versus
+  // rested. A round trip at 50c is the worst point on the curve.
+  check(
+    "a taker round trip at 50c costs more than three cents a contract",
+    roundTripFeeCentsPerContract(50) > 3,
+    `${roundTripFeeCentsPerContract(50)}`,
+  );
+}
+
+// --------------------------------------------------------- settlement outcomes
+
+section("collecting what markets actually settled at");
+reset();
+clearSettlements();
+{
+  check("an open market reports no result", isSettled("") === false);
+  check("whitespace is not a result either", isSettled("   ") === false);
+  check("yes is a result", isSettled("yes") === true);
+  check("so is void", isSettled("void") === true);
+
+  const closeTs = 1_700_000_000; // unix seconds
+  const closeMs = closeTs * 1000;
+  const m = (ticker: string, close: number): KalshiMarket =>
+    ({ ...mkt(ticker, 50, 51), close_ts: close }) as KalshiMarket;
+
+  let pending: PendingMap = addPending({}, [m("KXA", closeTs), m("KXB", closeTs + 600)]);
+  check("markets are remembered so their outcome can be collected", Object.keys(pending).length === 2);
+
+  pending = addPending(pending, [m("KXC", 0)]);
+  check("a market with no close time cannot be scheduled and is skipped", pending.KXC === undefined);
+
+  // A market seen on a hundred consecutive sweeps must not have its retry
+  // counter reset a hundred times, or it would be asked about forever.
+  pending.KXA = { ...pending.KXA, tries: 4, lastTry: 0 };
+  pending = addPending(pending, [m("KXA", closeTs)]);
+  check("re-seeing a market does not reset its retry count", pending.KXA.tries === 4);
+
+  check(
+    "a market is not asked about before it closes",
+    duePending(pending, closeMs - 1000).length === 0,
+  );
+  check(
+    "...nor immediately after, since Kalshi resolves a few minutes late",
+    duePending(pending, closeMs + 1000).length === 0,
+  );
+  const due = duePending({ KXA: { closeTs, tries: 0, lastTry: 0 } }, closeMs + SETTLE_GRACE_MS + 1);
+  check("...but it is once the grace period is up", due.length === 1 && due[0] === "KXA");
+
+  check(
+    "a market asked about a moment ago is not asked again immediately",
+    duePending(
+      { KXA: { closeTs, tries: 3, lastTry: closeMs + SETTLE_GRACE_MS } },
+      closeMs + SETTLE_GRACE_MS + 60_000,
+    ).length === 0,
+  );
+
+  const many: PendingMap = {};
+  for (let i = 0; i < 25; i++) many[`KX${i}`] = { closeTs: closeTs - i * 60, tries: 0, lastTry: 0 };
+  const batch = duePending(many, closeMs + SETTLE_GRACE_MS + 1, 10);
+  check("a backlog is drained a batch at a time", batch.length === 10);
+  check("oldest close first, so the backlog drains in resolution order", batch[0] === "KX24");
+
+  const pruned = prunePending(
+    {
+      tired: { closeTs, tries: MAX_TRIES, lastTry: 0 },
+      ancient: { closeTs: Math.floor(closeMs / 1000) - 30 * 86_400, tries: 0, lastTry: 0 },
+      fine: { closeTs, tries: 1, lastTry: 0 },
+    },
+    closeMs,
+  );
+  check("a market that will never answer is dropped", pruned.tired === undefined);
+  check("so is one whose close was weeks ago", pruned.ancient === undefined);
+  check("a live one is kept", pruned.fine !== undefined);
+
+  // Round-trip through disk, since the map has to survive a restart.
+  savePending({ KXA: { closeTs, tries: 2, lastTry: 7 } });
+  check("the pending map survives a restart", loadPending().KXA?.tries === 2);
+
+  appendSettlement({ ticker: "KXA", closeTs, result: "yes", ts: 1 });
+  appendSettlement({ ticker: "KXB", closeTs, result: "no", ts: 2 });
+  const rows = loadSettlements();
+  check("outcomes round-trip", rows.length === 2 && rows[1].result === "no");
+  check("the summary counts them", settlementInfo().settled === 2);
+
+  fs.appendFileSync(path.join(dataDir(), "settlements.jsonl"), '{"ticker":"KXTORN","res', "utf-8");
+  check(
+    "a torn final line is skipped rather than fatal",
+    loadSettlements().length === 2,
+    `${loadSettlements().length}`,
+  );
+
+  clearSettlements();
+  check("clearing removes both files", settlementInfo().settled === 0 && settlementInfo().pending === 0);
+}
+
+// ------------------------------------------------------- narration guardrails
+
+section("a model may reword results, never invent them");
+{
+  const input = {
+    subject: "a backtest",
+    summary: "The best was Fee band at +$23.78 over 40 trades with 57% won; the worst was Default at -$129.80 over 155 trades.",
+    evidence: [
+      { label: "Fee band", value: "+$23.78 over 40 trades, 57% won, profit factor 1.34" },
+      { label: "Default", value: "-$129.80 over 155 trades, 46% won, profit factor 0.62" },
+    ],
+  };
+
+  check(
+    "a faithful rewording passes",
+    unsupportedNumbers(
+      "Fee band finished ahead at +$23.78 across 40 trades, winning 57% of them, while Default lost $129.80 over 155 trades.",
+      input,
+    ).length === 0,
+  );
+
+  // The failure this exists for: a plausible, confident, fabricated P&L in the
+  // app's own voice. Nothing else in the pipeline would catch it.
+  check(
+    "an invented total is caught",
+    unsupportedNumbers("Fee band returned +$2,378 over the period.", input).includes("2378"),
+  );
+  check(
+    "an invented win rate is caught",
+    unsupportedNumbers("It won 71% of its trades.", input).includes("71"),
+  );
+
+  check(
+    "counting words are allowed",
+    unsupportedNumbers("Two of the 5 configurations finished ahead.", input).length === 0,
+  );
+  check(
+    "rounding to the precision written is allowed",
+    unsupportedNumbers("Fee band made about $23.8.", input).length === 0,
+  );
+  check(
+    "prose with no numbers is fine",
+    unsupportedNumbers("One configuration finished ahead and the rest lost money.", input).length === 0,
+  );
+
+  check("an OpenRouter key is recognised", looksLikeKey("sk-or-v1-0123456789abcdef0123456789abcdef"));
+  check("a placeholder is refused", !looksLikeKey("your_key_here"));
+  check("a truncated paste is refused", !looksLikeKey("sk-or-v1-short"));
+  check("a quoted paste is refused", !looksLikeKey('"sk-or-v1-0123456789abcdef0123456789abcdef"'));
+  check("every offered model is free", FREE_MODELS.every((m) => m.id.endsWith(":free")));
+  check("the default model is one of them", FREE_MODELS.some((m) => m.id === DEFAULT_MODEL));
+
+  // The vault must never hand the key back — the whole reason it lives in the
+  // main process. aiStatus is the only reader the renderer gets.
+  const statusKeys = Object.keys(aiStatus());
+  check("the status summary exposes no key field", !statusKeys.includes("apiKey"), statusKeys.join(","));
+}
+
+// ------------------------------------------------------------------- the tape
+
+section("recording what actually traded");
+reset();
+clearTape();
+{
+  const trade = (
+    id: string,
+    ticker: string,
+    ts: number,
+    price: number,
+    takerSold: boolean,
+    isBlock = false,
+  ): KalshiTrade => ({ tradeId: id, ticker, ts, price, count: 5, takerSold, isBlock });
+
+  const universe = new Set(["KXA", "KXB"]);
+  const kept = keepTrades(
+    [
+      trade("1", "KXA", 1000, 85, true),
+      trade("2", "KXZ", 1000, 85, true), // outside the recorded universe
+      trade("3", "KXB", 1000, 85, false, true), // block trade
+      trade("4", "KXB", 1000, 0, true), // no price
+      trade("", "KXA", 1000, 85, true), // no id, cannot be deduplicated
+    ],
+    universe,
+  );
+  check("trades on unrecorded markets are dropped", !kept.some((t) => t.ticker === "KXZ"));
+  // A block trade is negotiated off-book and never rested, so counting it
+  // would credit a fill to an order that could not have been on the other side.
+  check("block trades are dropped", !kept.some((t) => t.isBlock));
+  check("priceless rows are dropped", !kept.some((t) => t.price === 0));
+  check("rows with no id are dropped", !kept.some((t) => t.tradeId === ""));
+  check("a real trade survives", kept.length === 1 && kept[0].tradeId === "1");
+
+  check("nothing recorded means no tape", tapeInfo().exists === false);
+  const n = recordTrades([trade("a", "KXA", 5_000, 85, true), trade("b", "KXA", 6_000, 84, false)]);
+  check("trades are written", n === 2, `${n}`);
+  check("the tape counts them", tapeInfo().trades === 2);
+
+  // The poll window deliberately overlaps, so the same trade arrives twice.
+  const again = recordTrades([trade("b", "KXA", 6_000, 84, false), trade("c", "KXA", 7_000, 83, true)]);
+  check("a trade already written is not written again", again === 1, `${again}`);
+  check("so the overlap does not inflate the file", tapeInfo().trades === 3);
+
+  const tapeRows = loadTape();
+  check("the tape round-trips", tapeRows.length === 3);
+  check("the taker's direction survives", tapeRows[0].takerSold === true);
+  check("...including when they were buying", tapeRows[1].takerSold === false);
+  check("prices survive", tapeRows[2].price === 83);
+
+  // Which is the whole reason the tape exists: a resting YES bid is filled by
+  // somebody selling YES into it, not by somebody buying.
+  const hits = tapeRows.filter((t) => t.takerSold && t.price <= 85);
+  check("fills against a resting 85c bid are identifiable", hits.length === 2, `${hits.length}`);
+
+  check("the watermark advances to the newest trade", loadTapeState().lastTs === 7_000);
+  check(
+    "the next poll reaches back past it so a slow cycle loses nothing",
+    nextPollFrom() < 7_000 / 1000,
+    `${nextPollFrom()}`,
+  );
+
+  fs.appendFileSync(path.join(dataDir(), "tape.jsonl"), '{"i":"torn","k":"KX', "utf-8");
+  check("a torn final line is skipped", loadTape().length === 3, `${loadTape().length}`);
+  check("...and the summary still reports the tape", tapeInfo().exists === true);
+
+  clearTape();
+  check("clearing removes the tape", tapeInfo().exists === false);
+  check("...and its watermark, so a fresh run cold-starts", loadTapeState().lastTs === 0);
+
+  // Rotation is a rename, so an archived file must still be readable and
+  // countable. Simulated by writing the archive directly — provoking a real
+  // 100MB rotation in a test would take a minute and a gigabyte.
+  fs.writeFileSync(
+    path.join(dataDir(), "tape.1.jsonl"),
+    JSON.stringify({ i: "old1", k: "KXOLD", t: 1_000, p: 40, c: 3, s: 1 }) + "\n",
+    "utf-8",
+  );
+  recordTrades([trade("new1", "KXNEW", 9_000, 88, false)]);
+  const across = loadTape();
+  check("the archived half of the tape is still read", across.length === 2, `${across.length}`);
+  check("oldest first across the rotation", across[0].tradeId === "old1");
+  check("the summary counts both files", tapeInfo().trades === 2);
+  check("...and both their sizes", tapeInfo().bytes > 0);
+  check("the span reaches back into the archive", tapeInfo().firstTs === 1_000);
+  check("...and forward into the live file", tapeInfo().lastTs === 9_000);
+
+  clearTape();
+  check("clearing takes the archive too", loadTape().length === 0, `${loadTape().length}`);
+}
+
 section("backtest");
 reset();
 clearRecording();
@@ -2067,6 +2438,53 @@ check("reset deletes the scan recording", !fs.existsSync(path.join(dataDir(), "s
 // exit live inside this closer so no result is printed before these land.
 
 void (async () => {
+  section("the settlement sweep");
+  reset();
+  clearSettlements();
+  {
+    const closeTs = 1_700_000_000;
+    const now = closeTs * 1000 + SETTLE_GRACE_MS + 1;
+    const asked: string[] = [];
+
+    savePending({
+      KXYES: { closeTs, tries: 0, lastTry: 0 },
+      KXOPEN: { closeTs, tries: 0, lastTry: 0 },
+      KXDEAD: { closeTs, tries: 0, lastTry: 0 },
+    });
+
+    const report = await sweepSettlements(async (ticker) => {
+      asked.push(ticker);
+      if (ticker === "KXYES") return { status: "settled", result: "yes" };
+      if (ticker === "KXOPEN") return { status: "active", result: "" };
+      throw new Error("404 gone");
+    }, now);
+
+    check("every due market was asked about", asked.length === 3, `${asked.length}`);
+    check("the settled one was recorded", report.resolved === 1, `${report.resolved}`);
+    check("the open one was counted, not recorded", report.stillOpen === 1);
+    check("the failing one was counted too", report.failed === 1);
+
+    const rows = loadSettlements();
+    check("only the resolved market landed on disk", rows.length === 1 && rows[0].ticker === "KXYES");
+    check("with the outcome Kalshi gave", rows[0].result === "yes");
+    check("and the close time it was recorded against", rows[0].closeTs === closeTs);
+
+    const after = loadPending();
+    check("a resolved market stops being pending", after.KXYES === undefined);
+    check("an open one stays, with its attempt counted", after.KXOPEN?.tries === 1);
+    // A 404 and a 503 are handled identically on purpose: both count the
+    // attempt, so a ticker that has genuinely vanished ages out instead of
+    // being retried until the heat death of the universe.
+    check("a failed lookup also counts its attempt", after.KXDEAD?.tries === 1);
+
+    // Asking twice in a row must not double-count: the retry backoff holds
+    // the market back until enough time has passed.
+    const second = await sweepSettlements(async () => ({ status: "active", result: "" }), now + 1_000);
+    check("backoff stops an immediate second attempt", second.asked === 0, `${second.asked}`);
+
+    clearSettlements();
+  }
+
   section("held markets are never blind");
   reset();
   {

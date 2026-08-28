@@ -14,7 +14,23 @@ import {
   migrateLegacyCredentials,
   saveCredentials,
 } from "./engine/credentials";
-import { KalshiClient } from "./engine/kalshi";
+import { KalshiClient, type KalshiMarket } from "./engine/kalshi";
+import {
+  clearSettlements,
+  noteMarkets,
+  settlementInfo,
+  sweepSettlements,
+} from "./engine/settlements";
+import { clearTape, keepTrades, nextPollFrom, recordTrades, tapeInfo } from "./engine/tape";
+import {
+  FREE_MODELS,
+  aiStatus,
+  clearAi,
+  looksLikeKey,
+  narrate,
+  saveAi,
+  type NarrationInput,
+} from "./engine/ai";
 import { STRATEGIES, findStrategy } from "./engine/strategies";
 import {
   AppState,
@@ -230,7 +246,7 @@ function startPassiveRecorder(): void {
     sweeping = true;
     publicClient
       .getActiveMarkets(40)
-      .then((markets) => recordScan(markets))
+      .then((markets) => keepScan(markets))
       .catch(() => {
         // Offline or rate-limited: skip this sweep, try again next interval.
       })
@@ -238,6 +254,145 @@ function startPassiveRecorder(): void {
         sweeping = false;
       });
   }, 30_000);
+}
+
+/**
+ * A sweep is worth two different things and they are stored separately: the
+ * quotes, for replaying a strategy against the path, and the ticker, so its
+ * eventual outcome can be collected. Both call sites go through here so a
+ * future third one cannot record half of it.
+ */
+function keepScan(markets: KalshiMarket[]): void {
+  recordScan(markets);
+  noteMarkets(markets);
+  recordedUniverse.clear();
+  for (const m of markets) recordedUniverse.add(m.ticker);
+}
+
+/**
+ * The tickers in the most recent sweep, which is what the tape polls.
+ *
+ * Replaced rather than accumulated. A cumulative set would keep every market
+ * ever seen and poll thousands of settled tickers within a day, and the trades
+ * it collected would be for periods with no quotes recorded beside them —
+ * unjoinable, and paid for with real requests. A market that drops off the
+ * volume table stops being polled, which is exactly right: the study only ever
+ * asks whether an order rested during a window we have quotes for.
+ */
+const recordedUniverse = new Set<string>();
+
+/**
+ * ROM's Kalshi referral code, from Kalshi → Menu → Referrals.
+ *
+ * EMPTY DISABLES THE CARD ENTIRELY. That is deliberate rather than lazy: a
+ * half-configured affiliate link is worse than none, because it ships a button
+ * that either 404s or credits nobody, and the person who clicked it can no
+ * longer be credited afterwards — Kalshi only accepts a code before the first
+ * deposit and within 72 hours of signup.
+ *
+ * Kalshi's own copy is "up to $500"; the published distribution is $15 for 70%
+ * of claimants, $35 for 24%, $75 for 5%, $100 for 0.65% and $500 for 0.35%.
+ * The credit needs identity verification plus a trading requirement, and
+ * expires seven days after it is granted. Whatever the card says has to match
+ * that, because it is a promotional claim about a regulated venue.
+ */
+const KALSHI_REFERRAL_CODE = "07e2562a-3ef4-4b05-94e8-889e8d98b238";
+
+/**
+ * Kalshi's own short form, `kalshi.com/r/<code>`, rather than a hand-built
+ * `sign-up?referral=` query. The two are not interchangeable to guess between:
+ * a referral that lands on the wrong shape credits nobody, and Kalshi only
+ * accepts a code before the first deposit and inside 72 hours of signup, so
+ * there is no repairing it afterwards for whoever clicked.
+ */
+function referralUrl(): string | null {
+  const code = KALSHI_REFERRAL_CODE.trim();
+  if (code === "") return null;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(code)) return null;
+  return `https://kalshi.com/r/${encodeURIComponent(code)}`;
+}
+
+/**
+ * Collects settlement outcomes for markets that have already closed.
+ *
+ * Runs whether or not the engine is trading and whether or not quote recording
+ * is switched on. That sounds like ignoring the user's preference and is not:
+ * the backlog only ever grows while recording is enabled, so turning recording
+ * off lets this drain what was already gathered and then fall silent. Throwing
+ * away outcomes for quotes already on disk would waste the recording rather
+ * than respect the setting.
+ *
+ * Public endpoint, ten lookups a minute. Kalshi's read budget at the lowest
+ * tier is two hundred a second.
+ */
+/**
+ * Records the trade tape for the markets already being recorded.
+ *
+ * Runs alongside quote recording rather than instead of it, because the two
+ * answer different questions: quotes say what was on offer, the tape says what
+ * was taken. Only the second can tell whether a resting order would have
+ * filled, and that is the question the whole passive-execution case turns on.
+ *
+ * Gated on the same setting as quote recording — unlike the settlement sweep,
+ * this collects new data rather than completing data already gathered, so
+ * switching recording off must switch it off too.
+ */
+function startTapeRecorder(): void {
+  const publicClient = new KalshiClient();
+  let polling = false;
+
+  /** Small, so forty requests cannot starve a trading write of its budget. */
+  const CONCURRENCY = 4;
+
+  async function pollOnce(): Promise<void> {
+    const since = nextPollFrom();
+    const tickers = [...recordedUniverse];
+    for (let i = 0; i < tickers.length; i += CONCURRENCY) {
+      const batch = tickers.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map((t) => publicClient.getTrades(t, since)),
+      );
+      const got: Parameters<typeof recordTrades>[0] = [];
+      for (const r of results) {
+        // One market being unreachable must not cost the other thirty-nine.
+        if (r.status === "fulfilled") got.push(...r.value.trades);
+      }
+      recordTrades(keepTrades(got, recordedUniverse));
+    }
+  }
+
+  setInterval(() => {
+    if (polling) return;
+    if (!loadAppState().passiveRecording) return;
+    if (recordedUniverse.size === 0) return; // nothing to join trades to yet
+    polling = true;
+    pollOnce()
+      .catch(() => {
+        // Offline. The watermark only advances on a successful write, so the
+        // next poll asks for the same window and nothing is lost.
+      })
+      .finally(() => {
+        polling = false;
+      });
+  }, 30_000);
+}
+
+function startSettlementSweeper(): void {
+  const publicClient = new KalshiClient();
+  let sweeping = false;
+  setInterval(() => {
+    if (sweeping) return;
+    sweeping = true;
+    sweepSettlements((ticker) =>
+      publicClient.getMarket(ticker).then((m) => ({ status: m.status, result: m.result })),
+    )
+      .catch(() => {
+        // Offline: the pending map is unchanged, so nothing is lost.
+      })
+      .finally(() => {
+        sweeping = false;
+      });
+  }, 60_000);
 }
 
 function registerIpc(): void {
@@ -338,6 +493,38 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("backtest:info", () => recordingInfo());
+  ipcMain.handle("backtest:settlements", () => settlementInfo());
+  ipcMain.handle("backtest:tape", () => tapeInfo());
+
+  // The key is written here and never read back. `ai:status` returns a hint and
+  // a flag; there is deliberately no handler that hands the renderer the key,
+  // for the same reason the Kalshi vault has none.
+  ipcMain.handle("ai:status", () => aiStatus());
+  ipcMain.handle("ai:models", () => FREE_MODELS);
+  ipcMain.handle("ai:save", (_e, apiKey: string, model: string) => {
+    if (!looksLikeKey(apiKey)) {
+      throw new Error("That does not look like an OpenRouter key — they start with sk-or-v1-.");
+    }
+    saveAi({ apiKey, model });
+    return aiStatus();
+  });
+  ipcMain.handle("ai:clear", () => {
+    clearAi();
+    return aiStatus();
+  });
+  ipcMain.handle("ai:narrate", (_e, input: NarrationInput) => {
+    // Shape-checked rather than trusted: this text is interpolated into a
+    // prompt, and the renderer is the least trustworthy caller in the app.
+    const evidence = Array.isArray(input?.evidence) ? input.evidence.slice(0, 40) : [];
+    return narrate({
+      subject: String(input?.subject ?? "these results").slice(0, 120),
+      summary: String(input?.summary ?? "").slice(0, 4000),
+      evidence: evidence.map((e) => ({
+        label: String(e?.label ?? "").slice(0, 120),
+        value: String(e?.value ?? "").slice(0, 240),
+      })),
+    });
+  });
   ipcMain.handle("backtest:run", () => {
     const scans = loadRecording();
     if (scans.length < 10) {
@@ -350,6 +537,10 @@ function registerIpc(): void {
   });
   ipcMain.handle("backtest:clear", () => {
     clearRecording();
+    // Outcomes and prints belong to the quotes they describe. Keeping either
+    // after the recording is gone would leave rows nothing can be joined to.
+    clearSettlements();
+    clearTape();
     return recordingInfo();
   });
 
@@ -378,6 +569,15 @@ function registerIpc(): void {
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:dataDir", () => dataDir());
   ipcMain.handle("app:openDataFolder", () => shell.openPath(dataDir()));
+  ipcMain.handle("app:referral", () => referralUrl());
+  ipcMain.handle("app:openReferral", () => {
+    const url = referralUrl();
+    // Built here rather than passed in from the renderer: a URL that arrives
+    // over IPC is a URL an injected renderer can choose, and this one opens in
+    // the user's real browser.
+    if (!url) throw new Error("No referral code is configured.");
+    return shell.openExternal(url);
+  });
   ipcMain.handle("app:openMarket", (_e, ticker: string) => {
     // Only ever open Kalshi, and only for a ticker shaped like one.
     if (!/^[A-Z0-9._-]{1,64}$/i.test(ticker)) throw new Error("Refusing to open an odd ticker.");
@@ -447,8 +647,10 @@ if (!app.requestSingleInstanceLock()) {
       engine = new TradingEngine(loadSettings(), loadCredentials());
       // Every live sweep is kept so strategies can be compared on real data
       // later instead of on argument.
-      engine.setRecorder(recordScan);
+      engine.setRecorder(keepScan);
       startPassiveRecorder();
+      startSettlementSweeper();
+      startTapeRecorder();
       engine.subscribe({
         onState: (s) => {
           sendToRenderer("engine:state", s);

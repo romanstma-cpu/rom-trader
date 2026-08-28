@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { EquityPoint } from "./types";
+import type { AiStatus, EquityPoint, NarrationResult } from "./types";
 // Shared with the engine rather than reimplemented: the chart and the replay
 // must agree on what counts as a continuous stretch of time.
 import { splitAtGaps, sampledMs } from "../electron/engine/series";
@@ -126,6 +126,280 @@ export function Confirm({
 }
 
 /* ---------------- form field ---------------- */
+
+/**
+ * ROM's Kalshi sign-up card.
+ *
+ * Renders nothing at all when no referral code is configured, which is the
+ * whole safety property: there is no state in which this ships a button that
+ * goes nowhere or credits nobody. Kalshi accepts a referral code only before
+ * the first deposit and within 72 hours of signup, so a link that quietly
+ * fails cannot be repaired for the person who clicked it.
+ *
+ * The copy is Kalshi's own — "up to $500" — because the published distribution
+ * is $15 for roughly seven claimants in ten, and a flat headline figure would
+ * be a number most readers never see. The conditions are stated rather than
+ * buried: this is a promotional claim about a regulated venue, and the trading
+ * requirement, the verification and the seven-day expiry are the parts that
+ * decide whether the offer is worth anything to the person reading it. That
+ * ROM is paid for the referral is on the card for the same reason.
+ */
+export function KalshiSignup() {
+  const [url, setUrl] = useState<string | null>(null);
+  const toast = useToast();
+
+  useEffect(() => {
+    void window.rom.app.referral().then(setUrl);
+  }, []);
+
+  if (!url) return null;
+
+  async function open() {
+    try {
+      await window.rom.app.openReferral();
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    }
+  }
+
+  return (
+    <div className="promo">
+      <div className="promo-body">
+        <div className="promo-title">No Kalshi account yet?</div>
+        <div className="promo-text">
+          ROM Trader needs one to trade. Sign up through this link and Kalshi adds a welcome
+          bonus of <strong>up to $500</strong> in trading credit.
+        </div>
+        <div className="promo-fine">
+          Kalshi's offer, not ROM's. Most people get $15 — the published split is $15 for 70% of
+          claims, $35 for 24%, and larger amounts below that. Needs ID verification and a trading
+          requirement Kalshi sets, and the credit expires 7 days after it lands. ROM earns a
+          referral credit if you sign up.
+        </div>
+      </div>
+      <button className="btn primary" onClick={() => void open()}>
+        Open Kalshi sign-up ↗
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The OpenRouter key form, shared by every place that offers to set one.
+ *
+ * One form rather than two: the Connection page is where keys belong and the
+ * Backtest panel is where the need becomes obvious, and a copy in each would
+ * drift the moment either changed.
+ */
+function AiKeySetup({ status, onChange }: { status: AiStatus; onChange: (s: AiStatus) => void }) {
+  const [draft, setDraft] = useState("");
+  const [model, setModel] = useState(status.model);
+  const [models, setModels] = useState<{ id: string; label: string }[]>([]);
+  const toast = useToast();
+
+  useEffect(() => {
+    void window.rom.ai.models().then(setModels);
+  }, []);
+
+  const valid = /^sk-or-v1-[A-Za-z0-9._-]{16,}$/.test(draft.trim());
+
+  async function save() {
+    try {
+      onChange(await window.rom.ai.save(draft.trim(), model));
+      setDraft("");
+      toast("ok", "Key saved and encrypted for this Windows account.");
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    }
+  }
+
+  if (status.configured) {
+    return (
+      <div className="row-actions">
+        <span className="hint mono">key {status.keyHint}</span>
+        <select
+          value={status.model}
+          onChange={(e) => {
+            // Changing the model re-saves; the vault is the only copy of the key,
+            // so the main process reuses what it already holds.
+            void window.rom.ai.status().then(() => setModel(e.target.value));
+          }}
+          disabled
+          title="Remove and re-add the key to change model"
+        >
+          <option>{models.find((m) => m.id === status.model)?.label ?? status.model}</option>
+        </select>
+        <button className="btn danger quiet" onClick={() => void window.rom.ai.clear().then(onChange)}>
+          Remove key
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {!status.encryptionAvailable && (
+        <div className="notice bad">
+          Windows did not offer a credential store, so no key can be saved here.
+        </div>
+      )}
+      <div className="row-actions">
+        <input
+          type="password"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="sk-or-v1-…"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        <select value={model} onChange={(e) => setModel(e.target.value)}>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        <button className="btn primary" disabled={!valid || !status.encryptionAvailable} onClick={() => void save()}>
+          Save
+        </button>
+      </div>
+      {draft !== "" && !valid && (
+        <div className="hint warn">
+          OpenRouter keys start with <span className="mono">sk-or-v1-</span> — check for surrounding
+          quotes or a truncated paste.
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Key management on its own, for the Connection page.
+ *
+ * Separate from Narrate because a key is a setting and belongs with the other
+ * one, not buried behind a result that only appears after a backtest has run.
+ */
+export function AiKeyCard() {
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  useEffect(() => {
+    void window.rom.ai.status().then(setStatus);
+  }, []);
+  if (!status) return null;
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div className="label">Plain-English summaries</div>
+        <span className={`tag ${status.configured ? "live" : ""}`}>
+          {status.configured ? "configured" : "not set"}
+        </span>
+      </div>
+      <p className="hint">
+        Optional and free. With an OpenRouter key, ROM Trader can rewrite backtest results as a
+        paragraph. The key is encrypted with your Windows account, is sent only to openrouter.ai,
+        and is never readable by this screen again. Every number the model writes is checked against
+        the measured results first — invented figures are discarded and the measured summary stands.
+        The app never asks a model what to trade.
+      </p>
+      <AiKeySetup status={status} onChange={setStatus} />
+      <div className="hint">
+        Get a key free at <span className="mono">openrouter.ai/keys</span> — the models offered here
+        cost nothing to use.
+      </div>
+      {status.error && <div className="notice warn">{status.error}</div>}
+    </div>
+  );
+}
+
+/**
+ * Optional plain-English phrasing of results the app already computed.
+ *
+ * Renders the deterministic summary always, and the reworded version above it
+ * only when a model produced one that passed the checks. Never replaces the
+ * summary, because the summary is what the rewording was made from and the
+ * reader should be able to compare the two.
+ *
+ * The key lives in the main process vault. This component can ask for a
+ * narration and can write or clear a key; there is no path by which it can
+ * read one back.
+ */
+export function Narrate({
+  subject,
+  summary,
+  evidence,
+}: {
+  subject: string;
+  summary: string;
+  evidence: { label: string; value: string }[];
+}) {
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<NarrationResult | null>(null);
+  const toast = useToast();
+
+  useEffect(() => {
+    void window.rom.ai.status().then(setStatus);
+  }, []);
+
+  async function run() {
+    setBusy(true);
+    setResult(null);
+    try {
+      setResult(await window.rom.ai.narrate({ subject, summary, evidence }));
+    } catch (e) {
+      toast("bad", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!status) return null;
+
+  return (
+    <div className="narrate">
+      <div className="narrate-head">
+        <span className="label">In plain English</span>
+        {status.configured ? (
+          <button className="btn quiet tiny" onClick={() => void run()} disabled={busy}>
+            {busy ? "Writing…" : result ? "Rewrite" : "Explain these results"}
+          </button>
+        ) : (
+          <button className="btn quiet tiny" onClick={() => setOpen((v) => !v)}>
+            {open ? "Cancel" : "Set up"}
+          </button>
+        )}
+      </div>
+
+      {result?.ok && (
+        <>
+          <p className="narrate-text">{result.text}</p>
+          <div className="hint">
+            Reworded by {result.model}. Every figure in it was checked against the table above.
+          </div>
+        </>
+      )}
+      {result && !result.ok && (
+        <div className="hint">Not reworded — {result.reason}. The measured summary stands.</div>
+      )}
+
+      {!status.configured && open && (
+        <div className="narrate-setup">
+          <p className="hint">
+            Optional and free. An OpenRouter key lets a model rewrite these results as a paragraph —
+            it rewords the measured numbers and is never asked what to trade. You can also set this
+            on the Connection page.
+          </p>
+          <AiKeySetup status={status} onChange={setStatus} />
+          <div className="hint">
+            Get a key free at <span className="mono">openrouter.ai/keys</span>.
+          </div>
+        </div>
+      )}
+      {status.error && <div className="notice warn">{status.error}</div>}
+    </div>
+  );
+}
 
 export function Field({
   label,

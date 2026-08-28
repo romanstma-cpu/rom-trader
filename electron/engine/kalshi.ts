@@ -85,6 +85,58 @@ interface RawMarket {
   mve_collection_ticker?: string;
 }
 
+/**
+ * One completed trade, slimmed to what a fill study needs.
+ *
+ * `takerSold` is the whole point of the record: true when the aggressor was
+ * getting NO exposure, which on this book means selling YES into the resting
+ * bids. A resting YES buy at or above this price would have been the other
+ * side of it.
+ */
+export interface KalshiTrade {
+  tradeId: string;
+  ticker: string;
+  /** Epoch ms. */
+  ts: number;
+  /** YES price in cents. */
+  price: number;
+  count: number;
+  takerSold: boolean;
+  /** Block trades matched off-book; they never touched the order book. */
+  isBlock: boolean;
+}
+
+interface RawTrade {
+  trade_id?: string;
+  ticker?: string;
+  count_fp?: string;
+  yes_price_dollars?: string;
+  taker_outcome_side?: string;
+  taker_book_side?: string;
+  taker_side?: string;
+  created_time?: string;
+  is_block_trade?: boolean;
+}
+
+function toTrade(t: RawTrade): KalshiTrade {
+  // Kalshi is mid-migration here: taker_outcome_side and taker_book_side are
+  // canonical, taker_side is deprecated but still sent. Read the new fields
+  // first and fall back, so this keeps working through the removal rather than
+  // silently reporting every trade as a buy.
+  const outcome = (t.taker_outcome_side ?? t.taker_side ?? "").toLowerCase();
+  const book = (t.taker_book_side ?? "").toLowerCase();
+  const takerSold = outcome === "no" || book === "ask";
+  return {
+    tradeId: t.trade_id ?? "",
+    ticker: t.ticker ?? "",
+    ts: Date.parse(t.created_time ?? "") || 0,
+    price: toCents(t.yes_price_dollars),
+    count: parseFloat(t.count_fp ?? "0") || 0,
+    takerSold,
+    isBlock: t.is_block_trade === true,
+  };
+}
+
 function toCents(dollars: string | undefined): number {
   const n = parseFloat(dollars ?? "0");
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
@@ -267,6 +319,43 @@ export class KalshiClient {
       },
       status: m.status ?? "unknown",
       result: m.result ?? "",
+    };
+  }
+
+  /**
+   * Public: completed trades across every market, newest-first, from `minTs`.
+   *
+   * Quotes say what a market was offered at; only the tape says what actually
+   * changed hands. That distinction decides whether a resting order strategy
+   * is measurable at all. A top-of-book snapshot showing the bid drop from 85c
+   * to 84c is consistent with two opposite worlds — somebody sold into the 85c
+   * bid, or everybody resting at 85c simply cancelled — and those worlds have
+   * opposite meanings for a bid resting there. `taker_outcome_side` settles it:
+   * "no" means the aggressor was positioned for NO, which on a YES-priced book
+   * is a seller hitting the bid, which is the trade that would have filled us.
+   *
+   * Filtered per ticker, which is not the obvious choice and is the right one.
+   * The unfiltered feed looked cheaper — one request instead of forty — until
+   * it was measured: a full thousand-row page covered ten seconds of exchange
+   * time, so Kalshi prints on the order of a hundred trades a second across
+   * everything it lists. Keeping up unfiltered means paging continuously and
+   * discarding almost all of it, on the order of a gigabyte a day to keep a
+   * few megabytes. Forty small requests every thirty seconds is 1.3 a second
+   * against a budget of two hundred.
+   */
+  async getTrades(
+    ticker: string,
+    minTs: number,
+    limit = 1000,
+  ): Promise<{ trades: KalshiTrade[]; cursor: string }> {
+    const data = await this.request<{ trades?: RawTrade[]; cursor?: string }>(
+      "GET",
+      `/markets/trades?limit=${limit}&min_ts=${Math.floor(minTs)}` +
+        `&ticker=${encodeURIComponent(ticker)}`,
+    );
+    return {
+      trades: (data.trades ?? []).map(toTrade),
+      cursor: data.cursor ?? "",
     };
   }
 

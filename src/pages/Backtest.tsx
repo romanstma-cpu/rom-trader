@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
-import type { BacktestResult, RecordingInfo, SweepProgress, SweepReport } from "../types";
-import { Confirm, money, pnlClass, signedMoney, useToast } from "../ui";
+import type {
+  BacktestResult,
+  RecordingInfo,
+  SettlementInfo,
+  SweepProgress,
+  SweepReport,
+  TapeInfo,
+} from "../types";
+import { Confirm, Narrate, money, pnlClass, signedMoney, useToast } from "../ui";
 
 /** Mirrors prepareSweep in electron/engine/sweep.ts: the newest MAX_SWEEP_SCANS
  *  are used, split 60/40 by time. Duplicated rather than imported so the
@@ -39,8 +46,48 @@ function span(from: number | null, to: number | null): string {
   return `${(hours / 24).toFixed(1)} days`;
 }
 
+/**
+ * The one-paragraph reading of a backtest, computed rather than written.
+ *
+ * This is the source of truth the model is allowed to reword, so it has to
+ * stand on its own — and it has to resist the flattering summary. A replay
+ * where one preset is up and four are down is a replay that found noise, and
+ * saying so here is what stops the rewording from finding a winner in it.
+ */
+function summarise(results: BacktestResult[]): string {
+  const traded = results.filter((r) => r.trades > 0);
+  if (traded.length === 0) {
+    return "No configuration opened a trade on this recording, so the replay says nothing about any of them.";
+  }
+  const ranked = [...traded].sort((a, b) => b.pnlUsd - a.pnlUsd);
+  const best = ranked[0];
+  const worst = ranked[ranked.length - 1];
+  const up = traded.filter((r) => r.pnlUsd > 0);
+  const totalTrades = traded.reduce((s, r) => s + r.trades, 0);
+  const bestWin = best.trades > 0 ? Math.round((best.wins / best.trades) * 100) : 0;
+
+  const parts = [
+    `${up.length} of ${traded.length} configurations finished positive over ${totalTrades} trades in total.`,
+    `The best was ${best.label} at ${signedMoney(best.pnlUsd)} over ${best.trades} trades with ${bestWin}% won;` +
+      ` the worst was ${worst.label} at ${signedMoney(worst.pnlUsd)} over ${worst.trades} trades.`,
+  ];
+  if (up.length === 0) {
+    parts.push("Every configuration lost money on this stretch of market.");
+  } else if (up.length === 1) {
+    parts.push(
+      "One winner among several losers on a single stretch of market is what noise looks like, not what an edge looks like.",
+    );
+  }
+  if (best.trades < 30) {
+    parts.push(`${best.trades} trades is too few to separate skill from luck.`);
+  }
+  return parts.join(" ");
+}
+
 export default function Backtest() {
   const [info, setInfo] = useState<RecordingInfo | null>(null);
+  const [settle, setSettle] = useState<SettlementInfo | null>(null);
+  const [tape, setTape] = useState<TapeInfo | null>(null);
   const [results, setResults] = useState<BacktestResult[] | null>(null);
   const [running, setRunning] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -50,8 +97,13 @@ export default function Backtest() {
   const toast = useToast();
 
   useEffect(() => {
-    void window.rom.backtest.info().then(setInfo);
-    const t = setInterval(() => void window.rom.backtest.info().then(setInfo), 15000);
+    const pull = () => {
+      void window.rom.backtest.info().then(setInfo);
+      void window.rom.backtest.settlements().then(setSettle);
+      void window.rom.backtest.tape().then(setTape);
+    };
+    pull();
+    const t = setInterval(pull, 15000);
     const off = window.rom.backtest.onSweepProgress(setSweepProgress);
     return () => {
       clearInterval(t);
@@ -89,6 +141,8 @@ export default function Backtest() {
   async function clear() {
     setConfirmClear(false);
     setInfo(await window.rom.backtest.clear());
+    setSettle(await window.rom.backtest.settlements());
+    setTape(await window.rom.backtest.tape());
     setResults(null);
     toast("info", "Recording cleared. It starts again on the next scan.");
   }
@@ -137,6 +191,24 @@ export default function Backtest() {
             <span className={`v ${info.bytes >= ROTATE_WARN_BYTES ? "warn" : ""}`}>
               {bytes(info.bytes)}
             </span>
+          </div>
+          {/* Quotes say what a market was priced at; only this says whether the
+              thing happened. Shown next to the scan count because the two
+              answer different questions and the second one is newer. */}
+          <div>
+            <span className="k">Outcomes</span>
+            <span className="v">
+              {settle ? settle.settled.toLocaleString() : "—"}
+              {settle && settle.pending > 0 && (
+                <span className="hint"> · {settle.pending.toLocaleString()} awaiting</span>
+              )}
+            </span>
+          </div>
+          {/* Prints, not quotes. A resting order fills when somebody sells into
+              it, and only the tape records that happening. */}
+          <div>
+            <span className="k">Prints</span>
+            <span className="v">{tape ? tape.trades.toLocaleString() : "—"}</span>
           </div>
         </div>
 
@@ -375,6 +447,18 @@ export default function Backtest() {
               </>
             )}
           </div>
+
+          <Narrate
+            subject="a ROM Trader backtest across strategy presets"
+            summary={summarise(results)}
+            evidence={results.map((r) => ({
+              label: r.label,
+              value:
+                `${signedMoney(r.pnlUsd)} over ${r.trades} trades, ` +
+                `${r.trades > 0 ? Math.round((r.wins / r.trades) * 100) : 0}% won, ` +
+                `profit factor ${r.metrics.profitFactor === null ? "n/a" : r.metrics.profitFactor.toFixed(2)}`,
+            }))}
+          />
         </div>
       )}
 

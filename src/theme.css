@@ -401,6 +401,119 @@ body {
   margin-bottom: 12px;
 }
 
+/* ============ narration ============
+   Deliberately quiet. This is a rewording of the table above it, not a finding
+   of its own, and giving it the weight of a result would invert the point. */
+.narrate {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+
+.narrate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.narrate-text {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 0 0 6px;
+}
+
+.narrate-setup {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.narrate-setup input[type="password"] {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.narrate-key {
+  margin-top: 8px;
+}
+
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--violet);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.linkish:hover {
+  color: var(--pink);
+}
+
+/* ============ referral card ============
+   Reads as an offer rather than as a warning: the app's other coloured panels
+   (.notice.warn, .notice.bad) mean something is wrong, and an advert wearing
+   that costume trains people to ignore the ones that matter. Violet is the
+   brand accent and is used nowhere else for status. */
+.promo {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.16), rgba(255, 45, 154, 0.09));
+  border: 1px solid rgba(124, 58, 237, 0.42);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+
+.promo-body {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.promo-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+  margin-bottom: 5px;
+}
+
+.promo-text {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.promo-text strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+/* Small, but never hidden — these conditions decide whether the offer is
+   worth anything, so they stay legible rather than becoming decoration.
+   --muted rather than --faint for the same reason the site uses it: --faint
+   lands under 4.5:1 at this size, and the small print of a financial offer
+   should not be the hardest thing on screen to read. */
+.promo-fine {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .promo .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
 .label {
   font-size: 10.5px;
   letter-spacing: 1.1px;
