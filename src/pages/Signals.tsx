@@ -20,8 +20,8 @@ import { Narrate, timeAgo, useToast } from "../ui";
  * which rows compete for one slot. Kept as its own function rather than
  * imported because the renderer does not reach into `electron/`, and because
  * this one needs the outcome half too. The engine's copy is what drifted:
- * it read the event out of a `-T…`/`-B…` strike suffix until recently, so
- * this page grouped five KXCRYPTOLEAD15M outcomes under one heading while the
+ * it read the event out of a `-T…`/`-B…` strike suffix until 1.13.2, so this
+ * page grouped five KXCRYPTOLEAD15M outcomes under one heading while the
  * engine happily held positions in several of them. The page was right.
  */
 function splitTicker(ticker: string): { event: string; strike: string } {

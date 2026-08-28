@@ -954,7 +954,7 @@ demonstrated forward edge, and the app still opens in dry-run.
 
 ---
 
-# The ladder cap was not looking at most of the ladders
+# 1.13.2: the ladder cap was not looking at most of the ladders
 
 1.10.0 shipped two rules that both rest on one question: which markets
 settle together? The engine answered it with a regex that stripped a

@@ -126,8 +126,8 @@ export function computeMetrics(
   // Group by event ladder, not by ticker, so every rung of one BTC hour
   // collapses to a single unit of evidence.
   //
-  // `skill.eventOf`, which is now also what `TradingEngine.eventOf` calls.
-  // It was not always: the engine used to strip a `-T…`/`-B…` strike
+  // `skill.eventOf`, which since 1.13.2 is also what `TradingEngine.eventOf`
+  // calls. It was not always: the engine used to strip a `-T…`/`-B…` strike
   // suffix and nothing else, so a KXCRYPTOLEAD15M event with five siblings
   // counted as five events to the risk limits and one here. Measurement was
   // right and the limits were wrong; they now share the one definition, which

@@ -180,8 +180,8 @@ export function clusterBootstrapCI(
  *
  * This is also the engine's risk boundary: `TradingEngine.eventOf` calls
  * straight through, so the ladder cap, the loss lockout and every study built
- * on `groupByEvent` cannot drift apart. They did drift, from 1.10.0 until this
- * change — see the comment on `TradingEngine.eventOf` for what that cost.
+ * on `groupByEvent` cannot drift apart. They did drift, from 1.10.0 until
+ * 1.13.2 — see the comment on `TradingEngine.eventOf` for what that cost.
  *
  * One deliberate copy survives: `splitTicker` in `src/pages/Signals.tsx`, which
  * needs the outcome half as well and cannot import across the renderer

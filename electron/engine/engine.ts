@@ -317,9 +317,9 @@ export class TradingEngine {
    * one outcome, so they move together — a fact the ledger, the cooldowns and
    * the losing-streak brake all need.
    *
-   * This used to strip a `-T…`/`-B…` strike suffix and nothing else, which
-   * quietly under-grouped every series whose outcome segment is not a strike.
-   * Measured over the settlement record, that left nine series where
+   * Until 1.13.2 this stripped a `-T…`/`-B…` strike suffix and nothing else,
+   * which quietly under-grouped every series whose outcome segment is not a
+   * strike. Measured over the settlement record, that left nine series where
    * siblings shared an event and the engine saw one event per market:
    * KXCRYPTOLEAD15M (five mutually exclusive "which coin leads" outcomes),
    * KXDJI, KXAPRPOTUSD and KXYTVIEWSW (strike ladders whose lines are bare
