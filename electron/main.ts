@@ -22,6 +22,7 @@ import {
   sweepSettlements,
 } from "./engine/settlements";
 import { clearTape, keepTrades, nextPollFrom, recordTrades, tapeInfo } from "./engine/tape";
+import { clearSpot, spotInfo, sweepSpot } from "./engine/spot";
 import {
   FREE_MODELS,
   aiStatus,
@@ -377,6 +378,36 @@ function startTapeRecorder(): void {
   }, 30_000);
 }
 
+/**
+ * Records the underlying's price alongside the contract's.
+ *
+ * The one input every fair-value question needs, and the app has never had it.
+ * Every strategy measured so far has been a bet about the CONTRACT; a Kalshi
+ * crypto ladder settles on BTC, and without BTC's price there is no way to ask
+ * what a strike should be worth.
+ *
+ * Coinbase returns roughly 350 one-minute candles per request, so this catches
+ * up after a restart instead of starting blind, and one poll a minute across
+ * four assets costs nothing. Gated on the same switch as the tape: it collects
+ * new data rather than completing data already gathered.
+ */
+function startSpotRecorder(): void {
+  let polling = false;
+  setInterval(() => {
+    if (polling) return;
+    if (!loadAppState().passiveRecording) return;
+    polling = true;
+    sweepSpot()
+      .catch(() => {
+        // Offline. Nothing is written, and the next poll re-requests the same
+        // window — Coinbase always returns the recent history.
+      })
+      .finally(() => {
+        polling = false;
+      });
+  }, 60_000);
+}
+
 function startSettlementSweeper(): void {
   const publicClient = new KalshiClient();
   let sweeping = false;
@@ -495,6 +526,7 @@ function registerIpc(): void {
   ipcMain.handle("backtest:info", () => recordingInfo());
   ipcMain.handle("backtest:settlements", () => settlementInfo());
   ipcMain.handle("backtest:tape", () => tapeInfo());
+  ipcMain.handle("backtest:spot", () => spotInfo());
 
   // The key is written here and never read back. `ai:status` returns a hint and
   // a flag; there is deliberately no handler that hands the renderer the key,
@@ -541,6 +573,7 @@ function registerIpc(): void {
     // after the recording is gone would leave rows nothing can be joined to.
     clearSettlements();
     clearTape();
+    clearSpot();
     return recordingInfo();
   });
 
@@ -651,6 +684,7 @@ if (!app.requestSingleInstanceLock()) {
       startPassiveRecorder();
       startSettlementSweeper();
       startTapeRecorder();
+      startSpotRecorder();
       engine.subscribe({
         onState: (s) => {
           sendToRenderer("engine:state", s);

@@ -47,8 +47,19 @@ export const ABANDON_AFTER_MS = 7 * 24 * 3_600_000;
 /** And give up sooner if it keeps answering without a result. */
 export const MAX_TRIES = 20;
 
-/** Requests per sweep. Bounded so a backlog drains steadily instead of at once. */
-export const LOOKUPS_PER_SWEEP = 10;
+/**
+ * Requests per sweep, bounded so a backlog drains steadily rather than in a
+ * burst.
+ *
+ * Ten was far too cautious and it became the limiting factor on every
+ * measurement built on top: with markets closing faster than outcomes were
+ * collected, a fair-value study found 1,015 of its 1,065 signals had no
+ * recorded result — a 95% exclusion rate, which makes the surviving sample
+ * evidence of nothing. Forty a minute against a documented budget of two
+ * hundred reads a SECOND is still nothing, and it turns the outcome record
+ * from the bottleneck back into a byproduct.
+ */
+export const LOOKUPS_PER_SWEEP = 40;
 
 export interface PendingMarket {
   /** Unix seconds, as Kalshi reports it. */

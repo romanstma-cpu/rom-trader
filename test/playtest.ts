@@ -20,6 +20,15 @@ import {
   type KalshiTrade,
 } from "../electron/engine/kalshi";
 import {
+  calibrationOk,
+  modelEdgeNetCents,
+  oneLotFeeCents,
+  settlementUpProb,
+  sigma1m,
+  terminalUpProb,
+  wilsonLowerBound,
+} from "../electron/engine/fairvalue";
+import {
   DEFAULT_MODEL,
   FREE_MODELS,
   aiStatus,
@@ -1986,6 +1995,106 @@ clearSettlements();
 
   clearSettlements();
   check("clearing removes both files", settlementInfo().settled === 0 && settlementInfo().pending === 0);
+}
+
+// ------------------------------------------------------------ fair value
+
+section("what the contract should be worth, from the underlying");
+{
+  // A ladder strike well below spot with little time left is nearly certain.
+  const near = settlementUpProb({ spot: 100_000, strike: 99_000, sigma: 0.0008, minsLeft: 2 });
+  check("a strike far below spot with minutes left is near certain", near !== null && near > 0.99, `${near}`);
+
+  const far = settlementUpProb({ spot: 100_000, strike: 101_000, sigma: 0.0008, minsLeft: 2 });
+  check("a strike far above spot is near impossible", far !== null && far < 0.01, `${far}`);
+
+  const at = settlementUpProb({ spot: 100_000, strike: 100_000, sigma: 0.0008, minsLeft: 5 });
+  check("at the money is a coin flip", at !== null && Math.abs(at - 0.5) < 0.01, `${at}`);
+
+  // Time is the whole variable: the same distance is less certain with longer
+  // to run, which is what makes this a model rather than a threshold.
+  const short = settlementUpProb({ spot: 100_000, strike: 99_800, sigma: 0.0008, minsLeft: 2 })!;
+  const long = settlementUpProb({ spot: 100_000, strike: 99_800, sigma: 0.0008, minsLeft: 14 })!;
+  check("the same gap is less certain with more time left", short > long, `${short} vs ${long}`);
+
+  // The settlement rule is the point. Averaging sixty prints has less variance
+  // than the terminal price, so a favourite is MORE certain under the real
+  // rule than under a naive terminal-spot model.
+  const settle = settlementUpProb({ spot: 100_000, strike: 99_800, sigma: 0.0008, minsLeft: 3 })!;
+  const terminal = terminalUpProb({ spot: 100_000, strike: 99_800, sigma: 0.0008, minsLeft: 3 })!;
+  check(
+    "averaging the settlement window beats modelling the terminal price",
+    settle > terminal,
+    `settle ${settle.toFixed(4)} vs terminal ${terminal.toFixed(4)}`,
+  );
+
+  // Inside the final minute the observed prints are already banked.
+  const halfIn = settlementUpProb({
+    spot: 100_000, strike: 99_900, sigma: 0.0008, minsLeft: 0.5,
+    partialSum: 100_000 * 30, partialCount: 30,
+  })!;
+  const noneIn = settlementUpProb({ spot: 100_000, strike: 99_900, sigma: 0.0008, minsLeft: 0.5 })!;
+  check("prints already printed reduce the remaining uncertainty", halfIn >= noneIn, `${halfIn} vs ${noneIn}`);
+
+  check(
+    "missing inputs refuse rather than guess",
+    settlementUpProb({ spot: 0, strike: 100, sigma: 0.001, minsLeft: 5 }) === null &&
+      settlementUpProb({ spot: 100, strike: 100, sigma: 0, minsLeft: 5 }) === null,
+  );
+
+  // Realized volatility.
+  check("sigma refuses a series too short to measure", sigma1m([1, 2, 3]) === null);
+  const flat = Array.from({ length: 40 }, () => 100);
+  check("a flat series has no volatility to report", sigma1m(flat) === null, `${sigma1m(flat)}`);
+  const noisy = Array.from({ length: 40 }, (_, i) => 100 * (1 + (i % 2 === 0 ? 0.001 : -0.001)));
+  const s = sigma1m(noisy);
+  check("a moving series reports a positive sigma", s !== null && s > 0, `${s}`);
+
+  // The edge rule, and the fee subtlety that decides it.
+  const oneLot97 = oneLotFeeCents(97);
+  check(
+    "a single lot at 97c pays a whole cent, not the smooth curve's fifth",
+    Math.abs(oneLot97 - 1) < 1e-9,
+    `${oneLot97}c`,
+  );
+
+  const edge = modelEdgeNetCents({ upProb: 0.98, yesAskCents: 90, noAskCents: 11 });
+  check("an underpriced favourite shows positive net edge", edge !== null && edge.netCents > 0, `${edge?.netCents}`);
+  check("...on the side the model actually likes", edge?.side === "yes", edge?.side);
+
+  const fair = modelEdgeNetCents({ upProb: 0.9, yesAskCents: 90, noAskCents: 11 });
+  check(
+    "a fairly priced contract shows no edge once the fee is charged",
+    fair !== null && fair.netCents < 0,
+    `${fair?.netCents}`,
+  );
+  check("an unquotable market yields no edge", modelEdgeNetCents({ upProb: 0.99 }) === null);
+
+  // Evidence gating.
+  // A perfect record on a tiny sample reads as 100% and is worth far less;
+  // the bound is what a decision should use. Three from three lands near 0.53.
+  check(
+    "a perfect tiny record is discounted heavily",
+    wilsonLowerBound(3, 3) < 0.6,
+    `${wilsonLowerBound(3, 3).toFixed(3)}`,
+  );
+  check(
+    "...and the same rate on a real sample is not",
+    wilsonLowerBound(300, 300) > 0.98,
+    `${wilsonLowerBound(300, 300).toFixed(3)}`,
+  );
+  check("the bound rises with the sample", wilsonLowerBound(90, 100) > wilsonLowerBound(9, 10));
+  check("a thin record refuses to trade", calibrationOk(5, 5).ok === false);
+  check(
+    "a long good record clears",
+    calibrationOk(95, 100).ok === true,
+    calibrationOk(95, 100).reason,
+  );
+  check(
+    "a long bad record does not",
+    calibrationOk(60, 100).ok === false,
+    calibrationOk(60, 100).reason,
+  );
 }
 
 // ------------------------------------------------------- narration guardrails
