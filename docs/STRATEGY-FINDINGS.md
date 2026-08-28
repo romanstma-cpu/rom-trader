@@ -1176,3 +1176,77 @@ Stronger than it has ever been. Seven strategies have now been measured against
 event-clustered intervals and dumb baselines, and all seven lost. The app opens
 in dry-run, nothing here has a demonstrated forward edge, and the honest reading
 of this release is that the measurements finally became good enough to say so.
+
+# 1.15.0: the instrument becomes the product
+
+Seven strategies measured, seven negatives, and the free inputs exhausted —
+quotes, settlements, spot, the tape and now the order book. The research is
+finished. What that leaves is an awkward fact: the valuable half of this project
+was never the bot, it was the apparatus that proved the bot does not work, and
+that half has only ever existed in `scripts/`. Clone the repo, install a
+bundler, run node. Someone who downloaded the installer got the losing strategy
+and none of the evidence.
+
+So the studies start moving inside, and this release moves the first one.
+
+## The Evidence page
+
+It shows what the app has actually collected — quotes from the sweep, outcomes
+from the settlement sweeper, the trade tape, spot, and the order book — and runs
+the question that sits underneath every strategy: does a price on this venue
+mean what it says, and is any error big enough to trade through the spread and
+the fee?
+
+No API key, no network. It reads only what the app already wrote for itself.
+
+On the recording that exists today it reports 1,878 settled markets across 465
+independent events in under a second, and reproduces what the script version
+found: the gap runs negative through the upper bands (−7.8pp at 70-80c, −8.1pp
+at 90-95c), the buy-NO positives on favourites all straddle zero, and no band
+survives its fees. The verdict it prints says the book may well be mispriced and
+not by more than it costs to act on — which is the ordinary condition of a
+market that works.
+
+## The refusals are the point
+
+`calibration.ts` carries the same discipline the scripts do, and the suite pins
+each one:
+
+- **One observation per market**, at a fixed horizon before close. Every
+  recorded quote would let a market that stayed liquid for six hours outvote one
+  that went quiet, and would count a single outcome hundreds of times. The last
+  quote before close would bias toward the extremes, because a market drifts to
+  0 or 100 as it resolves.
+- **Event-clustered intervals**, which matter more here than anywhere else in
+  the app: the strikes of one event land in DIFFERENT price buckets, so one BTC
+  move fills the 90c bucket with winners and the 10c bucket with losers at the
+  same instant, and none of that is independent evidence.
+- **Each side pays its own ask.** Pricing NO as 100 minus the YES ask hands the
+  baseline a free crossing of the spread on every row, which on a 3c book is
+  worth more than any edge under discussion.
+- **Expected value per row, never from a bucket average**, because averaging the
+  price and then pricing the average smooths away exactly the fee non-linearity
+  that decides whether a deep favourite is worth buying.
+- **A band is tradeable only if its whole clustered interval clears zero AND it
+  rests on enough independent events to size against.** Anything less is
+  reported as suppressed with its event count. The position sizer would refuse
+  it, and a study that recommends what the sizer refuses is a study arguing with
+  itself.
+
+## Also
+
+`computeMetrics` and the History page were already corrected in 1.14.0 to count
+events rather than trades. This release makes the same standard reachable from
+the navigation rather than from a terminal.
+
+Two layout defects were caught by rendering the page in a real compositing
+Electron window against a throwaway profile — the stat cards were stacking
+full-width because the wrapper needs `grid stats` rather than `stats`, and the
+root carried a class this stylesheet has never defined where every other page
+uses a fragment. Neither would have shown up in a typecheck.
+
+## Caveat, standing
+
+Unchanged, and now easier to check. Nothing here has a demonstrated forward
+edge, the app opens in dry-run, and the Evidence page is free to tell you so
+using your own recording rather than mine.
