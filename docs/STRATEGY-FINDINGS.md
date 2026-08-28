@@ -951,3 +951,104 @@ and it is offered as exactly that.
 The defaults did not change. A preset is an invitation to test something; a
 default is a claim, and 33 trades does not support one. Nothing here has a
 demonstrated forward edge, and the app still opens in dry-run.
+
+---
+
+# The ladder cap was not looking at most of the ladders
+
+1.10.0 shipped two rules that both rest on one question: which markets
+settle together? The engine answered it with a regex that stripped a
+`-T…`/`-B…` strike suffix, so `KXBTCD-26AUG2420-T78699.99` and
+`-T78799.99` were one ladder. Correct, and far too narrow. A Kalshi
+market ticker is `SERIES-EVENT-OUTCOME`, and only threshold and range
+ladders write that last segment as a strike.
+
+Everything else fell through. Measured over the settlement record,
+**nine series carried siblings the engine read as one event per
+market**, so `maxPositionsPerEvent` and the hour-long ladder lockout
+never fired on them at all:
+
+| series | how it writes an outcome | siblings |
+| --- | --- | --- |
+| KXCRYPTOLEAD15M | `BTC`, `ETH`, `SOL`, `XRP`, `HYPE` | up to 5 |
+| KXDJI | `53190.00` | up to 7 |
+| KXAPRPOTUSD | `39.1` | up to 9 |
+| KXYTVIEWSW | `14.5M` | up to 5 |
+| four football series | `NEG`, `KUA`, `TIE` | 3 |
+| KXCBDECISIONKOREA | `H25`, `HOLD` | 2 |
+
+KXCRYPTOLEAD15M is the sharpest of them. Its five outcomes are
+mutually exclusive — exactly one coin leads the quarter-hour — so
+three positions in one lead market is a single bet at triple size that
+cannot pay out more than once, and the engine was free to hold all
+five. This is the same defect as 1.12.0's strike column inventing a
+strike of zero, one layer down: the ticker's last segment is not
+always a price, and code that assumes it is gets a wrong answer
+quietly.
+
+Nor was the shape rare. The recorded sweeps held siblings the old rule
+split in **886 of 3,950 scans** in the live log and **1,088 of 5,607**
+in the archive, up to nine deep. The scan logs also name series the
+settlement record has not caught up with yet — the AAA gas-price
+ladders, the KBO baseball series, `KXRAIN` — so nine is a floor.
+
+## The fix, and why it is the boring one
+
+`skill.eventOf` — written for the measurement scripts, and already
+used by the event-clustered confidence intervals — splits at the last
+dash and gets every one of these right. The engine now calls it. One
+definition, so the risk limits and the studies that grade those limits
+cannot disagree about what an independent event is. Two definitions is
+how they came to disagree in the first place.
+
+Audited before adopting rather than after. Every ticker this app has
+ever written down — settlements, backfill and both scan logs, **5,523
+distinct tickers across 119 series** — has exactly three dash-separated
+segments. Not one can collapse to its series, which is the only way
+splitting at the last dash could merge two events that are genuinely
+separate. Adjacent 15-minute windows stay apart, which is also why the
+fourteen 15M series were unharmed by the old rule: each of those
+markets is the only rung on its own ladder.
+
+## What the replay says, honestly
+
+Two entries refused across both recordings, none created, and the
+take-profit counts do not move — only stop-losses disappear.
+
+| recording | trades | P&L |
+| --- | --- | --- |
+| live log, 3,950 scans | 118 → 116 | −$77.29 → −$69.89 |
+| archive, 5,607 scans | 155 → 154 | −$129.80 → −$122.70 |
+
+Two trades is not a measurement and this document will not dress one up
+as an edge. The standard 1.10.0 was held to applies here unchanged: the
+cap's case is the risk shape, not the expectancy, and replays run
+brakes-off, so they never pay for the correlated cascade that trips the
+streak brake and parks the engine for a night.
+
+What the refusals do show is the mechanism, uncontaminated. The smaller
+was a rung of a gas-price ladder, worth −$0.30. The larger was this:
+
+    KXARGNACBGAME-26AUG22FCOABO-TIE   49c → 32c   −$4.06  stop-loss
+    KXARGNACBGAME-26AUG22FCOABO-FCO   73c → 21c   −$7.10  stop-loss
+
+One football match. The engine stopped out of the draw, then five
+minutes later bought the home side — the other side of the same ninety
+minutes, on the same disproof, for the second-largest single loss in
+the run. The two could not both have paid. That is the 1.10.0 cascade
+exactly, on a series the 1.10.0 rule could not see.
+
+## A regression the fix nearly shipped
+
+The Signals page explains every refusal, and the lockout message chose
+between "you lost here" and "your ladder lost next door" by testing
+whether a ticker equalled its own event key — true, under the old rule,
+exactly when a market had no siblings. Under the last-dash rule every
+real ticker differs from its event key, so that test would have blamed
+an imaginary sibling for **every ordinary stop-out**. The lock now
+carries the ticker that lost.
+
+It was caught by reading the call sites, not by the tests, which is the
+wrong order — the same order of mistake this document keeps recording.
+Restoring the old test with the new grouping fails two playtests with
+the wrong message quoted back, so it is pinned now.
