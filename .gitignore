@@ -31,3 +31,4 @@ scripts/fairvalue.js
 scripts/backfill.js
 scripts/calibrate.js
 scripts/flow.js
+scripts/book.js
