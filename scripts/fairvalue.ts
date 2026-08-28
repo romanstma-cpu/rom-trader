@@ -314,7 +314,13 @@ async function main(): Promise<void> {
 
   // ----------------------------------------------------------------- evaluate
   const priced: Row[] = [];
-  let pricedNoOutcome = 0;
+  // Distinct MARKETS, not market-scans. The usable side of this ratio is
+  // deduped to one row per ticker, so counting every sweep on the missing side
+  // would compare a per-scan number against a per-market one and report an
+  // exclusion rate inflated by however often each market happened to be
+  // scanned — which is exactly the quantity the ratio is supposed to be
+  // independent of.
+  const missing = new Set<string>();
 
   for (const scan of scans) {
     if (scan.ts < spotStart) continue;
@@ -327,9 +333,9 @@ async function main(): Promise<void> {
       if (!sp) continue;
       const outcome = settled.get(m.ticker);
       if (!outcome) {
-        // Count only rows the model could actually have priced, so the
+        // Count only markets the model could actually have priced, so the
         // exclusion rate is about missing outcomes rather than missing spot.
-        if (strikeOf(m.ticker) !== null && sp.sigma !== null) pricedNoOutcome++;
+        if (strikeOf(m.ticker) !== null && sp.sigma !== null) missing.add(m.ticker);
         continue;
       }
       const row = evaluate(m, scan.ts, asset, sp, outcome);
@@ -338,17 +344,18 @@ async function main(): Promise<void> {
   }
 
   const universe = firstSighting(priced);
+  const pricedNoOutcome = missing.size;
   const totalPriceable = universe.length + pricedNoOutcome;
   const exclusion = totalPriceable > 0 ? pricedNoOutcome / totalPriceable : 1;
 
   console.log(`  ---------------------------------------------------------------`);
   console.log(`  SAMPLE HEALTH — read this before any result below`);
   console.log(`  ---------------------------------------------------------------`);
-  console.log(`    market-scans the model could price   ${totalPriceable.toLocaleString()}`);
+  console.log(`    distinct markets the model could price  ${totalPriceable.toLocaleString()}`);
   console.log(
-    `    of those, no recorded outcome yet    ${pricedNoOutcome.toLocaleString()} (${pct(exclusion)})`,
+    `    of those, no recorded outcome yet       ${pricedNoOutcome.toLocaleString()} (${pct(exclusion)})`,
   );
-  console.log(`    usable rows (one per market)         ${universe.length.toLocaleString()}`);
+  console.log(`    usable (one row per market)             ${universe.length.toLocaleString()}`);
   if (exclusion > 0.5) {
     console.log(
       `\n    WARNING: more than half the population is missing. Markets that\n` +
