@@ -1804,8 +1804,13 @@ reset();
 
 section("performance metrics");
 {
+  // Every trade gets its own event ladder. This section is about the ratio and
+  // streak arithmetic, and streaks count ladders rather than rows — a shared
+  // ticker would quietly make all five trades one unit and test the grouping
+  // instead. The grouping has its own section at the end of this file.
+  let seq = 0;
   const t = (pnlUsd: number): TradeRecord => ({
-    ticker: "KXPM", title: "m", side: "yes", entryCents: 50, exitCents: 50,
+    ticker: `KXPM-26AUG26${seq++}-T1.99`, title: "m", side: "yes", entryCents: 50, exitCents: 50,
     contracts: 10, pnlUsd, openedAt: 0, closedAt: 0, reason: "test", dryRun: true,
   });
   const eq = (vals: number[]) => vals.map((v, i) => ({ ts: i, equityUsd: v }));
@@ -3785,6 +3790,72 @@ void (async () => {
       check("a flat trade counts in the trade total", m.trades === 3);
       check("but not as a win or a loss", m.wins === 1 && m.losses === 1);
       check("and the win rate interval still exists", m.winRateCI !== null);
+    }
+
+    {
+      // Streaks count ladders, not rows. This is 1.10.0's soak in miniature:
+      // five take-profits riding one BTC hour, then four stop-losses inside
+      // three minutes when the same rally pulled back. Nine rows, one market
+      // changing its mind — reported as 5W/4L it is the trade-count-as-sample
+      // -size error printed on the History page.
+      const cascade: TradeRecord[] = [];
+      for (let i = 0; i < 5; i++) cascade.push(tr(`KXBTCD-26AUG2621-T${70000 + i}.99`, 4, i));
+      for (let i = 0; i < 4; i++) cascade.push(tr(`KXBTCD-26AUG2621-T${80000 + i}.99`, -4, 10 + i));
+      const c = computeMetrics(cascade, []);
+      check("the nine rows are still nine trades", c.trades === 9);
+      check("one rally is one winning ladder", c.longestWinStreak === 1, `got ${c.longestWinStreak}`);
+      check("and one pullback is one losing ladder", c.longestLossStreak === 1, `got ${c.longestLossStreak}`);
+
+      // The other half, and the reason this is not just "divide by zero":
+      // four losses on four DIFFERENT ladders are four pieces of evidence and
+      // must still read as four. This is the overnight-chop session the
+      // findings doc singles out as genuinely independent.
+      const independent = [0, 1, 2, 3].map((i) => tr(`KXBTCD-26AUG26${10 + i}-T70000.99`, -4, i));
+      check(
+        "four separate ladders losing in a row still read as four",
+        computeMetrics(independent, []).longestLossStreak === 4,
+        `got ${computeMetrics(independent, []).longestLossStreak}`,
+      );
+
+      // A ladder that takes profit on some rungs and stops on others is not
+      // collapsed to one verdict — the run changes when the sign changes,
+      // even inside one event.
+      const mixed = [
+        tr("KXETHD-26AUG2621-T1.99", 4, 0),
+        tr("KXETHD-26AUG2621-T2.99", -4, 1),
+        tr("KXETHD-26AUG2621-T3.99", 4, 2),
+      ];
+      check(
+        "one ladder changing direction is not one unit",
+        computeMetrics(mixed, []).longestWinStreak === 1 &&
+          computeMetrics(mixed, []).longestLossStreak === 1,
+      );
+
+      // A flat trade must not split a run in two: it is not evidence, so the
+      // ladder either side of it is still the same ladder.
+      const flatInside = [
+        tr("KXBTCD-26AUG2621-T1.99", -4, 0),
+        tr("KXBTCD-26AUG2621-T2.99", 0, 1),
+        tr("KXBTCD-26AUG2621-T3.99", -4, 2),
+      ];
+      check(
+        "a flat trade inside a ladder does not split its run",
+        computeMetrics(flatInside, []).longestLossStreak === 1,
+        `got ${computeMetrics(flatInside, []).longestLossStreak}`,
+      );
+
+      // Returning to a ladder after trading a different one is a new run:
+      // the second visit is a fresh decision about a market that moved on.
+      const revisit = [
+        tr("KXBTCD-26AUG2621-T1.99", -4, 0),
+        tr("KXETHD-26AUG2621-T1.99", -4, 1),
+        tr("KXBTCD-26AUG2621-T2.99", -4, 2),
+      ];
+      check(
+        "coming back to a ladder later counts again",
+        computeMetrics(revisit, []).longestLossStreak === 3,
+        `got ${computeMetrics(revisit, []).longestLossStreak}`,
+      );
     }
   }
 

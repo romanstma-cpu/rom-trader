@@ -1052,3 +1052,41 @@ It was caught by reading the call sites, not by the tests, which is the
 wrong order — the same order of mistake this document keeps recording.
 Restoring the old test with the new grouping fails two playtests with
 the wrong message quoted back, so it is pinned now.
+
+## And the number sitting beside the correction
+
+`computeMetrics` counted streaks per trade twenty-four lines above the
+comment explaining that a ladder is one unit of evidence. So the History
+page's "Streaks" card reported 1.10.0's soak — five take-profits riding
+one BTC hour, then four stop-losses when it pulled back — as **5W/4L**,
+which is one market changing its mind wearing nine coats. Streaks now
+count consecutive *ladders*: a run of same-event trades on the same side
+of zero counts once, while distinct ladders in a row still count
+separately, because four losses across four ladders really are four
+pieces of evidence.
+
+Measured over the recordings, the correction is worth nothing at the
+shipped default and a great deal without it:
+
+| | trades / ladders | per trade | per ladder |
+| --- | --- | --- | --- |
+| live log, cap 1 | 116 / 82 | 5W 6L | 5W 6L |
+| live log, cap off | 194 / 63 | 15W 13L | **5W 7L** |
+| archive, cap 1 | 154 / 108 | 7W 6L | 6W 6L |
+| archive, cap off | 268 / 93 | 15W 11L | **5W 7L** |
+
+With the cap on, the streaks were already honest — the cap prevents the
+stacking, so consecutive losses were already landing on different
+ladders. The same is true of the recorded live history: 44 trades across
+33 ladders, 4W/4L either way. The old count only lies where ladders
+stack, which is exactly the condition 1.10.0 identified and exactly the
+condition `maxPositionsPerEvent` is adjustable back into — Settings
+allows up to 50, and the Backtest page's cap-off comparison row runs at
+99. There the old number reported a fifteen-trade winning streak that
+was five ladders, and a thirteen-trade losing streak that was seven.
+
+Nothing about the losing-streak *brake* changed. It still counts trades,
+and making it count ladders would make it fire less readily — the first
+change in this whole thread that would not be strictly conservative. It
+deserves its own measurement and its own argument, not a ride on a
+display fix.

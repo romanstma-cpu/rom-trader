@@ -183,11 +183,9 @@ export function clusterBootstrapCI(
  * on `groupByEvent` cannot drift apart. They did drift, from 1.10.0 until
  * 1.13.2 — see the comment on `TradingEngine.eventOf` for what that cost.
  *
- * One deliberate copy survives: `splitTicker` in `src/pages/Signals.tsx`, which
- * needs the outcome half as well and cannot import across the renderer
- * boundary. It has always split at the last dash; if this rule ever changes,
- * that one changes with it or the page starts drawing ladders the engine does
- * not enforce.
+ * No copies survive. `splitTicker` in `src/pages/Signals.tsx` calls this to
+ * find the boundary and keeps the remainder as the outcome, so the ladders
+ * the page draws are by construction the ladders the engine enforces.
  */
 export function eventOf(ticker: string): string {
   const i = ticker.lastIndexOf("-");

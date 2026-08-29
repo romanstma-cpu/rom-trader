@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Signal } from "../types";
 import { Narrate, timeAgo, useToast } from "../ui";
+// The engine's own event rule, not a copy — see splitTicker below.
+import { eventOf } from "../../electron/engine/skill";
 
 /**
  * A Kalshi market ticker is SERIES-EVENTCODE-STRIKE, e.g.
@@ -14,20 +16,24 @@ import { Narrate, timeAgo, useToast } from "../ui";
  * eight indistinguishable rows on the screen the site calls "the bot showing
  * its work".
  *
- * The `event` half must stay identical to `skill.eventOf`, because the groups
- * drawn here are the ladders `maxPositionsPerEvent` and the loss lockout act
- * on — a group heading that says "5 markets · 2 qualified" is a claim about
- * which rows compete for one slot. Kept as its own function rather than
- * imported because the renderer does not reach into `electron/`, and because
- * this one needs the outcome half too. The engine's copy is what drifted:
- * it read the event out of a `-T…`/`-B…` strike suffix until 1.13.2, so this
- * page grouped five KXCRYPTOLEAD15M outcomes under one heading while the
- * engine happily held positions in several of them. The page was right.
+ * The event half is `skill.eventOf` itself rather than a copy of it, because
+ * the groups drawn here are the ladders `maxPositionsPerEvent` and the loss
+ * lockout act on — a heading reading "5 markets · 2 qualified" is a claim
+ * about which rows compete for one position slot, and a page that draws
+ * ladders the engine does not enforce is lying quietly. That is not
+ * hypothetical: the engine read the event out of a `-T…`/`-B…` strike suffix
+ * until 1.13.2, so this page grouped five KXCRYPTOLEAD15M outcomes under one
+ * heading while the engine held positions in several of them. The page was
+ * right, and it was right by luck — both were free-standing implementations
+ * that happened to agree. Now only one of them can be wrong at a time.
+ *
+ * Importing across into `electron/` is the established shape here: History
+ * pulls `computeMetrics` from the same tree for the same reason. `skill.ts`
+ * has no imports of its own, so the renderer bundle takes nothing with it.
  */
 function splitTicker(ticker: string): { event: string; strike: string } {
-  const i = ticker.lastIndexOf("-");
-  if (i <= 0) return { event: ticker, strike: "" };
-  return { event: ticker.slice(0, i), strike: ticker.slice(i + 1) };
+  const event = eventOf(ticker);
+  return { event, strike: event === ticker ? "" : ticker.slice(event.length + 1) };
 }
 
 /**

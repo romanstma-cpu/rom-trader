@@ -63,7 +63,12 @@ export interface PerformanceMetrics {
   maxDrawdownUsd: number;
   /** Largest peak-to-trough fall relative to the peak. Null without equity data. */
   maxDrawdownPct: number | null;
+  /**
+   * Longest run of consecutive winning LADDERS. A run of same-event trades on
+   * the same side of zero counts once — five rungs of one rally is one win.
+   */
   longestWinStreak: number;
+  /** The same, for losses: four rungs of one pullback is one loss, not four. */
   longestLossStreak: number;
 }
 
@@ -106,19 +111,47 @@ export function computeMetrics(
     if (peak > 0 && dd / peak > maxDdPct) maxDdPct = dd / peak;
   }
 
+  // Streaks count consecutive LADDERS, not consecutive rows.
+  //
+  // The same correction the intervals below make, applied to the number that
+  // sits beside them. 1.10.0's soak is the case: five take-profits riding one
+  // BTC rally, then four stop-losses inside three minutes when it pulled back
+  // — every one of them a rung of the same KXBTCD hour. Reporting "4L" for
+  // one market move changing its mind is the trade-count-as-sample-size error
+  // in miniature, and this file argues against it twenty lines further down.
+  //
+  // A run of same-event trades on the same side of zero therefore counts once.
+  // Distinct ladders in a row still count separately, which is exactly the
+  // distinction the overnight-chop session was praised for: four losses spread
+  // across four different ladders are four pieces of evidence, and four rungs
+  // of one ladder are one. An event is not collapsed to a single verdict,
+  // though — a ladder really can take profit on some rungs and stop out on
+  // others, so a win run and a loss run inside one event stay two units.
+  //
+  // Relies on `history` being in close order, which it is: every writer
+  // appends on exit.
   let winStreak = 0;
   let lossStreak = 0;
   let bestWinStreak = 0;
   let bestLossStreak = 0;
-  for (const p of pnls) {
-    if (p > 0) {
+  let runEvent: string | null = null;
+  let runSign = 0;
+  for (const t of history) {
+    const sign = t.pnlUsd > 0 ? 1 : t.pnlUsd < 0 ? -1 : 0;
+    // A dead-flat trade breaks neither streak; it is not evidence either way,
+    // and it does not interrupt the run it sits inside.
+    if (sign === 0) continue;
+    const ev = eventOf(t.ticker);
+    if (ev === runEvent && sign === runSign) continue; // same ladder, still the same move
+    runEvent = ev;
+    runSign = sign;
+    if (sign > 0) {
       winStreak += 1;
       lossStreak = 0;
-    } else if (p < 0) {
+    } else {
       lossStreak += 1;
       winStreak = 0;
     }
-    // A dead-flat trade breaks neither streak; it is not evidence either way.
     if (winStreak > bestWinStreak) bestWinStreak = winStreak;
     if (lossStreak > bestLossStreak) bestLossStreak = lossStreak;
   }

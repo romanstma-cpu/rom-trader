@@ -178,7 +178,7 @@ export default function History({ onChanged }: { onChanged: () => void }) {
             <span className="muted"> / </span>
             <span className="neg">{metrics.longestLossStreak}L</span>
           </div>
-          <div className="hint">longest runs</div>
+          <div className="hint">longest runs · one ladder counts once</div>
         </div>
       </div>
 
