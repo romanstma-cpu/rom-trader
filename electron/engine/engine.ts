@@ -510,6 +510,46 @@ export class TradingEngine {
     return since > 0 ? this.ownHistory().filter((t) => t.closedAt > since) : this.ownHistory();
   }
 
+  /**
+   * Consecutive losing LADDERS at the end of the record, counted back from the
+   * newest trade and stopped early once `limit` is reached.
+   *
+   * This brake asks a question about evidence, not about money: its whole
+   * premise is that a run of losses means the market changed shape or the
+   * settings are wrong. Four rungs of one ladder stopping out together is one
+   * market move disagreeing once, so counting it as four answers a question
+   * nobody asked — and 1.10.0 watched exactly that park the engine for a night
+   * on a single BTC pullback. Sibling losses therefore collapse; distinct
+   * ladders in a row still count separately, because those really are four
+   * independent disagreements.
+   *
+   * The money side is unaffected and deliberately so: `dailyLossLimitUsd` and
+   * `maxDrawdownPct` count every dollar of a cascade exactly as before. This
+   * one counts reasons to doubt the strategy.
+   *
+   * Measured before changing: at the shipped cap of one position per ladder
+   * this returns what the old row count returned (4 halts against 4 over the
+   * live recording, 6 against 7 over the archive), because the cap already
+   * stops the stacking. It diverges where the cap is raised — 6 against 14 —
+   * which is where the old number was wrong.
+   *
+   * A flat trade ends the run, as it always has here: the brake stops at the
+   * first trade that did not lose.
+   */
+  private losingLadderStreak(limit: number): number {
+    let streak = 0;
+    let lastEvent: string | null = null;
+    for (const t of [...this.brakeHistory()].reverse()) {
+      if (t.pnlUsd >= 0) break;
+      const ev = TradingEngine.eventOf(t.ticker);
+      if (ev === lastEvent) continue; // another rung of the same disproof
+      lastEvent = ev;
+      streak += 1;
+      if (streak >= limit) break;
+    }
+    return streak;
+  }
+
   private todayPnl(history: TradeRecord[]): number {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
@@ -591,15 +631,10 @@ export class TradingEngine {
 
     const streakLimit = this.settings.maxConsecutiveLosses;
     if (streakLimit > 0) {
-      let streak = 0;
-      for (const t of [...this.brakeHistory()].reverse()) {
-        if (t.pnlUsd >= 0) break;
-        streak += 1;
-        if (streak >= streakLimit) break;
-      }
+      const streak = this.losingLadderStreak(streakLimit);
       if (streak >= streakLimit) {
         return (
-          `The last ${streak} ${mode} trades all lost, which is the limit you set, so the ` +
+          `The last ${streak} ${mode} ladders all lost, which is the limit you set, so the ` +
           `engine would stop again on its first scan. Press Resume to carry on, or change the ` +
           `limit in Settings.`
         );
@@ -1873,31 +1908,28 @@ export class TradingEngine {
   }
 
   /**
-   * Four losses in a row is not variance you should sit through unattended;
-   * either the market changed shape or the settings are wrong. Counts back
-   * from the newest trade and stops at the first win.
+   * Four losing ladders in a row is not variance you should sit through
+   * unattended; either the market changed shape or the settings are wrong.
+   * Counts back from the newest trade and stops at the first win, collapsing
+   * sibling rungs — see `losingLadderStreak` for why.
    */
   private enforceLosingStreak(): void {
     const limit = this.settings.maxConsecutiveLosses;
     if (limit <= 0 || this.status !== "running") return;
 
-    let streak = 0;
-    for (const t of [...this.brakeHistory()].reverse()) {
-      if (t.pnlUsd >= 0) break;
-      streak += 1;
-      if (streak >= limit) break;
-    }
+    const streak = this.losingLadderStreak(limit);
     if (streak < limit) return;
 
     this.haltedReason =
-      `${streak} losing ${this.isLive ? "live" : "paper"} trades in a row. Engine stopped itself. ` +
-      `Review the strategy, then press Resume to carry on or change the limit in Settings.`;
+      `${streak} losing ${this.isLive ? "live" : "paper"} ladders in a row — separate events, ` +
+      `not sibling strikes of one. Engine stopped itself. Review the strategy, then press ` +
+      `Resume to carry on or change the limit in Settings.`;
     this.log("warn", this.haltedReason);
     this.emitEvent({
       kind: "halted",
       tone: "bad",
       title: "ROM Trader stopped itself",
-      body: `${streak} losing trades in a row.`,
+      body: `${streak} losing ladders in a row.`,
     });
     this.stop();
   }

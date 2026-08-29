@@ -268,7 +268,7 @@ export default function SettingsPage({ onChanged }: { onChanged: () => void }) {
           />
           <NumberField
             label="Stop after losses in a row"
-            help="A losing streak usually means the market changed shape or the settings are wrong. 0 disables it."
+            help="A losing streak usually means the market changed shape or the settings are wrong. Sibling strikes of one event count once, so a whole ladder stopping out together is one loss, not four. 0 disables it."
             value={settings.maxConsecutiveLosses}
             min={0}
             onChange={(v) => update({ maxConsecutiveLosses: v })}

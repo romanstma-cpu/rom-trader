@@ -1085,8 +1085,64 @@ allows up to 50, and the Backtest page's cap-off comparison row runs at
 99. There the old number reported a fifteen-trade winning streak that
 was five ladders, and a thirteen-trade losing streak that was seven.
 
-Nothing about the losing-streak *brake* changed. It still counts trades,
-and making it count ladders would make it fire less readily — the first
-change in this whole thread that would not be strictly conservative. It
-deserves its own measurement and its own argument, not a ride on a
-display fix.
+## The brake had the same arithmetic, and it was not a display bug
+
+The losing-streak brake counted rows too, and there it is not a number on
+a page — it is the thing that parks the engine. This was the one change
+in the whole sequence that would make a safety feature fire *less*
+readily, so it got measured before it got written. At the shipped limit
+of four:
+
+| | trades | halts by row | by ladder |
+| --- | --- | --- | --- |
+| live log, cap 1 | 116 | 4 | 4 |
+| live log, cap off | 194 | 14 | 6 |
+| archive, cap 1 | 154 | 7 | 6 |
+| archive, cap off | 268 | 16 | 9 |
+
+**At the shipped default it changes nothing** — four halts either way on
+the live recording, six against seven on the archive. The cap already
+prevents the stacking that produced the miscount. Where the cap is
+raised, more than half the halts were one market move: fourteen becomes
+six.
+
+That is the argument for making the change rather than against it. This
+brake asks a question about evidence — its own comment says a losing run
+means "the market changed shape or the settings are wrong" — and four
+rungs of one ladder stopping together is one market disagreeing once.
+1.10.0 watched precisely that park the engine for a night on a single BTC
+pullback. The money side is untouched and deliberately so: the daily-loss
+limit and the drawdown brake still count every dollar of a cascade, which
+is the right place to count dollars. `blockedByBrakes` counts the same
+way, through the same helper, so Start and the first scan cannot disagree
+about whether the engine may run.
+
+## Watching it work on a live book
+
+Everything above is replay, and the research scripts all run brakes-off,
+so the harness is structurally blind to half of this. The rules had also
+never been *seen* refusing a real entry: in a short live run the price
+band and the spread limit reject the siblings long before the cap is
+reached. Relaxing only the entry filters — the cap left at its shipped
+default of one — and pointing the real engine at Kalshi in dry-run for
+five minutes settled it. Nine distinct tickers refused by the cap, across
+KXBTC, KXBTCD, KXETHD and four 15-minute series:
+
+    [CAP ] KXBTC-26AUG2905-B77550    already holding a position on this
+                                     ladder — sibling strikes are the same bet
+
+and at the end of five minutes of real books, **no ladder held more than
+once** — which is the invariant the cap exists to maintain, observed
+rather than argued.
+
+More useful still, both halves of the lockout message fired on real
+tickers, fifteen distinct ones each:
+
+    [LOCK] KXETH-26AUG2905-B2437     locked out for 60m after losing here
+    [LOCK] KXBTC-26AUG2905-B77450    its ladder stopped out — locked for
+                                     60m after losing there
+
+The first of those is the regression this release nearly shipped, caught
+in the wild rather than in a test. Before the lock started carrying the
+ticker that lost, all fifteen of those markets would have been told a
+sibling stopped out — for a loss each of them took on its own line.

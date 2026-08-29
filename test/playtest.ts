@@ -623,9 +623,12 @@ check("a zero limit disables the halt", e.getState().status === "running");
 section("losing-streak brake");
 reset();
 {
-  // Four losses in a row, newest last.
+  // Four losses in a row, newest last, on four SEPARATE ladders — which is
+  // what the brake counts. `KXL-1`…`KXL-4` would have been one event ladder
+  // wearing four tickers, and the brake now (rightly) reads that as a single
+  // disproof; the ladder cases have their own block below.
   const losses: TradeRecord[] = [1, 2, 3, 4].map((n) => ({
-    ticker: `KXL-${n}`, title: "loss", side: "yes",
+    ticker: `KXL-26AUG26${n}-T1.99`, title: "loss", side: "yes",
     entryCents: 50, exitCents: 46, contracts: 10, pnlUsd: -0.4,
     openedAt: Date.now() - n * 1000, closedAt: Date.now() - n * 900,
     reason: "stop-loss", dryRun: true,
@@ -659,6 +662,77 @@ reset();
   fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(withWin), "utf-8");
   e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
   check("a win breaks the streak", e.getState().status === "running");
+
+  // The brake counts ladders, because it is asking about evidence rather than
+  // about money. This is 1.10.0's evening exactly: four adjacent strikes of
+  // one KXBTCD hour stopping out together on one pullback, which parked the
+  // engine for the night on a single market move. The dollars are still
+  // counted in full by the daily-loss and drawdown brakes.
+  const cascade: TradeRecord[] = [1, 2, 3, 4].map((n) => ({
+    ticker: `KXBTCD-26AUG2621-T7${n}000.99`, title: "rung", side: "yes",
+    entryCents: 50, exitCents: 46, contracts: 10, pnlUsd: -0.4,
+    openedAt: Date.now() - n * 1000, closedAt: Date.now() - n * 900,
+    reason: "stop-loss", dryRun: true,
+  }));
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(cascade), "utf-8");
+  e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
+  check(
+    "one ladder cascading four times does not trip the brake",
+    e.getState().status === "running",
+    e.getState().haltedReason ?? "",
+  );
+
+  // …but four ladders is still four. The rule removes a miscount, not the brake.
+  const four: TradeRecord[] = [1, 2, 3, 4].map((n) => ({
+    ticker: `KXBTCD-26AUG26${20 + n}-T70000.99`, title: "rung", side: "yes",
+    entryCents: 50, exitCents: 46, contracts: 10, pnlUsd: -0.4,
+    openedAt: Date.now() - n * 1000, closedAt: Date.now() - n * 900,
+    reason: "stop-loss", dryRun: true,
+  }));
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(four), "utf-8");
+  e = runEngine({ maxConsecutiveLosses: 4 }, [flat2, flat2, flat2, flat2, up]);
+  check("four separate ladders still halt it", e.getState().status === "stopped");
+  check(
+    "and the halt says ladders, not trades",
+    (e.getState().haltedReason ?? "").includes("ladders in a row"),
+    e.getState().haltedReason ?? "",
+  );
+
+  // A cascade padded out to the limit by ONE more ladder counts as two, not
+  // five — the guard against the collapse quietly swallowing real evidence.
+  const cascadePlusOne: TradeRecord[] = [
+    ...cascade,
+    {
+      ticker: "KXETHD-26AUG2621-T2500.99", title: "other", side: "yes",
+      entryCents: 50, exitCents: 46, contracts: 10, pnlUsd: -0.4,
+      openedAt: Date.now(), closedAt: Date.now() + 100, reason: "stop-loss", dryRun: true,
+    },
+  ];
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(cascadePlusOne), "utf-8");
+  e = runEngine({ maxConsecutiveLosses: 2 }, [flat2, flat2, flat2, flat2, up]);
+  check("a cascade plus one other ladder is two disproofs", e.getState().status === "stopped");
+  e = runEngine({ maxConsecutiveLosses: 3 }, [flat2, flat2, flat2, flat2, up]);
+  check("and not three", e.getState().status === "running", e.getState().haltedReason ?? "");
+
+  // blockedByBrakes counts the same way, or Start and the first scan would
+  // disagree about whether the engine may run — the refusal on Start exists
+  // precisely so they cannot. Each case writes its own history: a halt closes
+  // open positions, which appends, so leaning on what an earlier run left
+  // behind would make these depend on the order they happen to execute in.
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(cascade), "utf-8");
+  const afterCascade = new TradingEngine({ ...DEFAULT_SETTINGS, maxConsecutiveLosses: 4 });
+  check(
+    "the pre-start check also reads a cascade as one ladder",
+    afterCascade.blockedByBrakes() === null,
+    afterCascade.blockedByBrakes() ?? "",
+  );
+  fs.writeFileSync(path.join(dataDir(), "history.json"), JSON.stringify(four), "utf-8");
+  const afterFour = new TradingEngine({ ...DEFAULT_SETTINGS, maxConsecutiveLosses: 4 });
+  check(
+    "and still refuses to start on four separate ladders",
+    (afterFour.blockedByBrakes() ?? "").includes("ladders all lost"),
+    afterFour.blockedByBrakes() ?? "",
+  );
 }
 
 section("paper and live are separate accounts");
