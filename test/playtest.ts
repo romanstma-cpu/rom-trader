@@ -134,6 +134,12 @@ import {
   sizePosition,
 } from "../electron/engine/sizing";
 import {
+  calibrate,
+  noPnlCents,
+  yesPnlCents,
+  type CalibrationObs,
+} from "../electron/engine/calibration";
+import {
   TOP_LEVELS,
   bookImbalance,
   clearDepth,
@@ -3929,6 +3935,129 @@ void (async () => {
         "coming back to a ladder later counts again",
         computeMetrics(revisit, []).longestLossStreak === 3,
         `got ${computeMetrics(revisit, []).longestLossStreak}`,
+      );
+    }
+  }
+
+  // ------------------------------------- calibration: the study, inside the app
+  {
+    section("Calibration — is the book mispriced, and does it matter?");
+
+    const obs = (o: Partial<CalibrationObs> & { event: string }): CalibrationObs => ({
+      ticker: `${o.event}-T1.99`,
+      bid: 49,
+      ask: 51,
+      mid: 50,
+      outcome: 1,
+      ...o,
+    });
+
+    {
+      const empty = calibrate([], 30);
+      check("an empty recording produces no bands", empty.bands.length === 0);
+      check("and says so plainly", empty.verdict.includes("Nothing recorded yet"));
+      check("with nothing claimed tradeable", empty.tradeable.length === 0);
+    }
+
+    {
+      // Each baseline must pay its OWN ask. On a 40/60 book both sides cost
+      // 60c plus fee; pricing NO as 100 minus the YES ask would hand it the
+      // spread for free.
+      const wide = obs({ event: "E1", bid: 40, ask: 60, mid: 50, outcome: 1 });
+      const feeAt60 = oneLotFeeCents(60, "cent");
+      check(`the one-lot fee at 60c is ${feeAt60}c`, feeAt60 === 2);
+      check(
+        "buying YES pays its ask plus the fee",
+        yesPnlCents(wide) === 100 - 60 - feeAt60,
+        `${yesPnlCents(wide)}`,
+      );
+      check(
+        "buying NO pays the NO ask plus the fee, not 100 minus the YES ask",
+        noPnlCents(wide) === -(100 - 40) - feeAt60,
+        `${noPnlCents(wide)}`,
+      );
+    }
+
+    {
+      // A genuine, obvious edge across enough independent events.
+      const rows = Array.from({ length: 30 }, (_, i) => obs({ event: `EV${i}`, outcome: 1 }));
+      const rep = calibrate(rows, 30);
+      check("thirty markets are thirty events", rep.events === 30);
+      check("every one settled YES", rep.yesRate === 1);
+      const band = rep.bands.find((b) => b.label === "50-60c");
+      check("they land in the 50-60c band", !!band, rep.bands.map((b) => b.label).join(","));
+      check("the gap is strongly positive", (band?.gapPp ?? 0) > 40);
+      check(
+        "buying YES there clears zero on its whole interval",
+        !!band && band.buyYesCI[0] > 0,
+        JSON.stringify(band?.buyYesCI),
+      );
+      check("so the band is reported tradeable", rep.tradeable.some((t) => t.includes("50-60c")));
+      check("and nothing is suppressed", rep.suppressed.length === 0);
+    }
+
+    {
+      // THE GATE. Same obvious edge, too few independent events to size on.
+      const rows = Array.from({ length: 30 }, (_, i) => obs({ event: `EV${i % 5}`, ticker: `EV${i % 5}-T${i}.99`, outcome: 1 }));
+      const rep = calibrate(rows, 30);
+      check("thirty rows across five ladders count as five events", rep.events === 5);
+      check(
+        "nothing is called tradeable below the sizer's floor",
+        rep.tradeable.length === 0,
+        rep.tradeable.join(" | "),
+      );
+      check("it is reported as suppressed instead", rep.suppressed.length > 0);
+      check(
+        "and the reason names the event count",
+        rep.suppressed.some((s) => s.includes("5 events")),
+        rep.suppressed.join(" | "),
+      );
+      check(
+        "the verdict refuses to conclude",
+        rep.verdict.includes("independent events"),
+        rep.verdict,
+      );
+    }
+
+    {
+      // A correctly-priced book: half settle YES at 50c. Neither side should
+      // clear zero once the fee is charged.
+      const rows = Array.from({ length: 40 }, (_, i) =>
+        obs({ event: `EV${i}`, outcome: i % 2 === 0 ? 1 : 0 }),
+      );
+      const rep = calibrate(rows, 30);
+      check("a coin-flip book shows no tradeable band", rep.tradeable.length === 0);
+      check(
+        "and the verdict blames the fee, not the model",
+        rep.verdict.includes("not by more than the spread and the fee"),
+        rep.verdict,
+      );
+      const band = rep.bands.find((b) => b.label === "50-60c");
+      check("its gap is near zero", Math.abs(band?.gapPp ?? 99) < 6, `${band?.gapPp}`);
+    }
+
+    {
+      // Bucketing is on the mid, and a market is counted once.
+      const rows = [
+        obs({ event: "A", bid: 4, ask: 6, mid: 5, outcome: 0 }),
+        obs({ event: "B", bid: 94, ask: 96, mid: 95, outcome: 1 }),
+      ];
+      const rep = calibrate(rows, 30);
+      check("a cheap market lands in a low band", rep.bands.some((b) => b.label === "5-10c"));
+      check("a favourite lands in the top band", rep.bands.some((b) => b.label === "95-99c"));
+      check("each band holds one market", rep.bands.every((b) => b.n === 1));
+      check("the horizon is carried through", rep.horizonMinutes === 30);
+    }
+
+    {
+      // Determinism: the same rows must give the same interval, or "did my
+      // change help" becomes unanswerable.
+      const rows = Array.from({ length: 25 }, (_, i) => obs({ event: `EV${i}`, outcome: i % 3 === 0 ? 0 : 1 }));
+      const a = calibrate(rows, 30);
+      const b = calibrate(rows, 30);
+      check(
+        "two runs over identical data agree exactly",
+        JSON.stringify(a.bands) === JSON.stringify(b.bands),
       );
     }
   }

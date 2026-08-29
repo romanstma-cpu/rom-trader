@@ -22,7 +22,7 @@ import { eventOf } from "../../electron/engine/skill";
  * about which rows compete for one position slot, and a page that draws
  * ladders the engine does not enforce is lying quietly. That is not
  * hypothetical: the engine read the event out of a `-T…`/`-B…` strike suffix
- * until 1.13.2, so this page grouped five KXCRYPTOLEAD15M outcomes under one
+ * until 1.15.1, so this page grouped five KXCRYPTOLEAD15M outcomes under one
  * heading while the engine held positions in several of them. The page was
  * right, and it was right by luck — both were free-standing implementations
  * that happened to agree. Now only one of them can be wrong at a time.

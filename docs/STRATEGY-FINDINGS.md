@@ -952,9 +952,308 @@ The defaults did not change. A preset is an invitation to test something; a
 default is a claim, and 33 trades does not support one. Nothing here has a
 demonstrated forward edge, and the app still opens in dry-run.
 
+# 1.14.0: the measurements were wrong, and fixing them killed the best result
+
+Two open-source Kalshi bots were read end to end for this release —
+[OctagonAI/kalshi-trading-bot-cli](https://github.com/OctagonAI/kalshi-trading-bot-cli)
+and [alsk1992/CloddsBot](https://github.com/alsk1992/CloddsBot), both MIT. Almost
+nothing was taken from their strategies. What was taken was their **scoreboard**,
+and it invalidated the most promising result this project had produced.
+
+## The fair-value model looked like the first real edge
+
+1.13.0 shipped a model that prices the UNDERLYING rather than the contract. A
+crypto ladder settles on BTC, so given spot, realized volatility and the minutes
+remaining, a strike has a computable probability. Kalshi settles on the mean of
+roughly sixty one-second index prints over the final minute, so the variance of
+that average — `σ²·Σi²/n²`, about 0.342 minutes of ordinary diffusion — is what
+the model uses near expiry, and prints already observed inside the final minute
+are banked rather than treated as risk.
+
+Its first run: **twenty-one signals, twenty-one correct, Wilson lower bound
+88.6%.** The first thing in this investigation that had not immediately died.
+
+It was an artifact. Three separate errors, all of them mine.
+
+### 1. Wilson assumes independent trials, and these are not
+
+A Kalshi event carries a ladder of strikes over ONE underlying path. "Above
+78,000", "above 78,500" and "above 79,000" in the same hour are decided together
+by the same move. Three rows, one outcome. Counting them as three successes
+shrinks the interval by a `sqrt(3)` that was never earned, and over a dozen
+strikes the overstatement is severe.
+
+Octagon's own test names the trap exactly: *the row bootstrap thinks N is a
+hundred when the honest N is twenty.* Intervals now come from a cluster
+bootstrap that resamples EVENTS, and both intervals print side by side so the
+manufactured confidence is visible rather than argued about. On the corrected
+run the clustered hit-rate interval was **[42.4%, 54.1%]** where the naive one
+claimed **[45.3%, 51.1%]** — not merely narrower, but excluding most of the real
+range.
+
+### 2. 61% of these markets settle NO
+
+Measured on this app's own settlement record: 414 NO against 263 YES. An event
+has one true outcome and many strikes that miss it, so the universe is
+structurally tilted. Any strategy leaning NO harvests that tilt and looks like a
+forecaster; comparing a win rate against 50% compares it against a baseline
+nobody offers.
+
+Every number is now reported beside the same arithmetic with the model switched
+off — always-YES and always-NO over the identical rows, **each paying its own
+ask** rather than being handed a free crossing of the spread — and the DELTA is
+the only part that is about the model. Within-band skill repeats the comparison
+inside entry-price buckets, because a model that only buys 90c favourites beats a
+whole-book baseline on price alone.
+
+### 3. The exclusion rate was measured in the wrong unit
+
+Sample health is the one number the report tells the reader to check first, and
+it compared two different things: the usable side was deduped to one row per
+market, the missing side counted every sweep. A market scanned forty times
+contributed forty to the numerator and one to the denominator, so the ratio
+measured scan frequency rather than coverage. It read 87% missing. Counting
+distinct markets on both sides, it was **8.1%**.
+
+That inverts what the result means rather than adjusting it. A negative verdict
+on 5% of a population is a shrug; the same verdict on 92% of it is an answer.
+
+## The corrected verdict
+
+1,104 markets, **126 independent events**, 8.1% missing:
+
+| | model | best dumb baseline |
+|---|---|---|
+| P&L per contract | **−3.59c** | −1.54c (always NO) |
+| skill vs book | **−2.2%**, CI [−6.6%, +1.8%] | — |
+| loses in | **4 of 5 price bands** | — |
+
+The signals arm is the clearest line in the run: it hits **88.5% and still loses
+3.35c**. Winning 88.5% is a loss when the entry cost 92c — it needed 93%. Its
+directional calls were good; it expressed them at a price that ate the edge.
+
+Skill is `1 − brierModel/brierBook`. Positive means the model carries
+information the price does not. Zero means it is an expensive way to reproduce
+the ask.
+
+## Nobody had asked what settled
+
+The exclusion rate was never a slow sweeper. The settlement sweeper only asks
+about markets it has SEEN — `noteMarkets` adds a ticker when a scan observes it
+— so everything recorded before the sweeper existed was invisible to it
+permanently: **3,933 closed markets that had never once been looked up, against
+679 that had.**
+
+`scripts/backfill.ts` asks for all of them at eight a second. **3,840 answered,
+zero failures.** They had been sitting there settled for days, one public GET
+each, against a documented budget of two hundred reads a second.
+
+Spot history was the other half of the same wall. One Coinbase request returns
+350 one-minute candles — under six hours — so only markets too recent to have
+settled could be priced. `fetchCandleHistory` pages backwards instead, and sigma
+is computed ONCE over the merged series: computing it per page would leave the
+first hour of every chunk with a truncated window, a volatility sawtooth
+recurring every 300 minutes that would make the model most confident exactly
+where it knew least.
+
+## So the question underneath got asked at last
+
+Six studies had asked whether some IDEA beat the book. None had asked whether
+the book is wrong at all. `scripts/calibrate.ts` takes one quote per settled
+market at a fixed horizon, buckets by price, and compares against what happened.
+
+**The book IS mis-calibrated.** At thirty minutes out the gap runs negative in
+eleven of twelve buckets — markets settle YES less often than their price
+implies, by as much as **−10.1pp at 70-80c**.
+
+**It is still not money.** After the spread and the one-lot fee, not one bucket
+on either side has a clustered interval that clears zero. Buying YES is reliably
+negative in six of them; the buy-NO positives on favourites all straddle zero.
+The tilt is real and smaller than the cost of acting on it, which is the
+ordinary condition of a market that works. At sixty minutes the gap reverses
+sign — suggestive only, because that is a different population.
+
+## And the tape says nothing either
+
+The last unused input: 473,571 real prints carrying `taker_outcome_side`, which
+names the aggressor. Quotes are opinions and cost nothing to post; a trade is
+somebody spending money.
+
+Asking whether order-flow imbalance predicts YES is worthless on its own, because
+heavy buying pushes the price up and the price already predicts YES — flow
+"predicts" the outcome because flow is most of what MADE the price. So
+`scripts/flow.ts` measures the RESIDUAL: realised settlement minus what the book
+was already quoting. Best coverage, 209 markets and **143 independent events**:
+
+```
+sold hard  −14.2pp     bought       −4.4pp
+sold        −2.8pp     bought hard  −5.1pp
+balanced    −3.5pp
+```
+
+The column does not rise with buying pressure. Between the tails, bought −4.6pp
+against sold −5.2pp — a difference of **0.6pp** with overlapping intervals.
+Flat. The persistent negative level is the same YES-overpricing the calibration
+study found, and belongs to the book, not the flow.
+
+Across roughly sixty tests — six parameter sets, five thresholds, two directions
+— exactly **one** interval cleared zero, on eleven events. That is fewer winners
+than chance alone produces. The sweep now applies the same twenty-event floor
+`sizing.ts` enforces and prints such rows as SUPPRESSED with their event count.
+A study that recommends what the sizer would refuse is a study arguing with
+itself.
+
+## Both sides of the trade are now closed, for different reasons
+
+- **As taker** — the spread plus the fee exceeds the book's mispricing in every
+  band. Structural, and *not* fixed by polling faster: speed does not shrink a
+  spread or a fee.
+- **As maker** — the fee is genuinely $0.00 on these series, but resting orders
+  eat **−12.4pp of adverse selection**, because a resting bid only fills on a
+  downtick and a downtick is informative. Mechanical, not bad luck.
+
+Seven strategies measured, seven negatives, and the free inputs are exhausted:
+quotes, settlements, spot, and now the tape.
+
+## What the instrument itself cannot see
+
+The recorder keeps the top forty by volume, and volume arrives near expiry, so
+**the median market is in the recorded universe for only ten minutes** (p25 2,
+p75 38, p95 70). Anything needing a longer view of a market has no data behind
+it and cannot be backtested here — worth knowing before designing one, and it is
+why the sixty-minute calibration run quietly switches to a long-lived
+subpopulation.
+
+## Shipped
+
+- **`skill.ts`** — Brier, skill-vs-book, event-clustered bootstrap, zero-skill
+  baselines, within-band skill, and per-slice strategy tags (`BTC_YES_e02-04_t05-15`,
+  adapted from CloddsBot: one number for a strategy hides the case where half its
+  slices pay and half bleed). The seeded generator is this app's own — an
+  interval that moves between runs cannot answer whether a change helped.
+- **`sizing.ts`** — Kelly with the safety catch welded on. The old `sizeFactor`
+  comment rejected Kelly because it needs a trusted edge estimate; that objection
+  was right, and `skill.ts` is what answers it. It refuses any size below twenty
+  independent events or a skill interval touching zero, and shrinks the model's
+  probability toward the book by the clustered lower bound — so an unproven model
+  prices at the market and sizes at zero **by construction**, not because a
+  caller remembered to check. The fee is folded into the cost rather than
+  subtracted after, which at 85c is a whole cent against a fifteen-cent payoff.
+  **Nothing is wired to an order.**
+- **`depth.ts`** — the last free input Kalshi publishes that this app never
+  stored, and the only one that cannot be backfilled: a resolved book is gone.
+  Five levels a side, forty markets every thirty seconds. Kalshi returns two BID
+  ladders, not a bid side and an ask side, both ascending — a NO bid at 21c is
+  somebody offering YES at 79c — so the NO ladder is mirrored into one book in
+  YES cents, pinned by a test against a real captured response.
+- **The History page stops flattering the trade count.** It showed a win rate
+  and a per-trade figure with no interval and no honest denominator, so fifteen
+  trades across three ladders read as fifteen independent results. `computeMetrics`
+  now reports `events` alongside `trades`, both headline numbers carry
+  event-clustered intervals, and where the counts diverge by more than a factor
+  of two the page says so in words — a widened interval with no explanation reads
+  as a worse result rather than an honester one.
+- **`backfill.ts`, `calibrate.ts`, `flow.ts`**, and a rewritten `fairvalue.ts`.
+
+## Known, and deliberately not changed here
+
+There are two `eventOf` implementations and they disagree. `TradingEngine.eventOf`
+strips only a `-T…`/`-B…` strike suffix; `skill.eventOf` splits at the last dash.
+Measured across 4,519 settlements they agree on the crypto threshold ladders and
+disagree elsewhere: KXCRYPTOLEAD15M has up to five siblings per event that the
+engine's rule reads as five separate events, and KXDJI and KXAPRPOTUSD are worse
+— so `maxPositionsPerEvent` and the ladder loss-lockout do not fire on those
+series. The fifteen-minute crypto series are unaffected: they carry exactly one
+market per event.
+
+`metrics.ts` uses the broader rule, which is correct for measurement. Widening
+the ENGINE's is a live-behaviour change and is left as its own task rather than
+smuggled into a metrics release.
+
+## Caveat, standing
+
+Stronger than it has ever been. Seven strategies have now been measured against
+event-clustered intervals and dumb baselines, and all seven lost. The app opens
+in dry-run, nothing here has a demonstrated forward edge, and the honest reading
+of this release is that the measurements finally became good enough to say so.
+
+# 1.15.0: the instrument becomes the product
+
+Seven strategies measured, seven negatives, and the free inputs exhausted —
+quotes, settlements, spot, the tape and now the order book. The research is
+finished. What that leaves is an awkward fact: the valuable half of this project
+was never the bot, it was the apparatus that proved the bot does not work, and
+that half has only ever existed in `scripts/`. Clone the repo, install a
+bundler, run node. Someone who downloaded the installer got the losing strategy
+and none of the evidence.
+
+So the studies start moving inside, and this release moves the first one.
+
+## The Evidence page
+
+It shows what the app has actually collected — quotes from the sweep, outcomes
+from the settlement sweeper, the trade tape, spot, and the order book — and runs
+the question that sits underneath every strategy: does a price on this venue
+mean what it says, and is any error big enough to trade through the spread and
+the fee?
+
+No API key, no network. It reads only what the app already wrote for itself.
+
+On the recording that exists today it reports 1,878 settled markets across 465
+independent events in under a second, and reproduces what the script version
+found: the gap runs negative through the upper bands (−7.8pp at 70-80c, −8.1pp
+at 90-95c), the buy-NO positives on favourites all straddle zero, and no band
+survives its fees. The verdict it prints says the book may well be mispriced and
+not by more than it costs to act on — which is the ordinary condition of a
+market that works.
+
+## The refusals are the point
+
+`calibration.ts` carries the same discipline the scripts do, and the suite pins
+each one:
+
+- **One observation per market**, at a fixed horizon before close. Every
+  recorded quote would let a market that stayed liquid for six hours outvote one
+  that went quiet, and would count a single outcome hundreds of times. The last
+  quote before close would bias toward the extremes, because a market drifts to
+  0 or 100 as it resolves.
+- **Event-clustered intervals**, which matter more here than anywhere else in
+  the app: the strikes of one event land in DIFFERENT price buckets, so one BTC
+  move fills the 90c bucket with winners and the 10c bucket with losers at the
+  same instant, and none of that is independent evidence.
+- **Each side pays its own ask.** Pricing NO as 100 minus the YES ask hands the
+  baseline a free crossing of the spread on every row, which on a 3c book is
+  worth more than any edge under discussion.
+- **Expected value per row, never from a bucket average**, because averaging the
+  price and then pricing the average smooths away exactly the fee non-linearity
+  that decides whether a deep favourite is worth buying.
+- **A band is tradeable only if its whole clustered interval clears zero AND it
+  rests on enough independent events to size against.** Anything less is
+  reported as suppressed with its event count. The position sizer would refuse
+  it, and a study that recommends what the sizer refuses is a study arguing with
+  itself.
+
+## Also
+
+`computeMetrics` and the History page were already corrected in 1.14.0 to count
+events rather than trades. This release makes the same standard reachable from
+the navigation rather than from a terminal.
+
+Two layout defects were caught by rendering the page in a real compositing
+Electron window against a throwaway profile — the stat cards were stacking
+full-width because the wrapper needs `grid stats` rather than `stats`, and the
+root carried a class this stylesheet has never defined where every other page
+uses a fragment. Neither would have shown up in a typecheck.
+
+## Caveat, standing
+
+Unchanged, and now easier to check. Nothing here has a demonstrated forward
+edge, the app opens in dry-run, and the Evidence page is free to tell you so
+using your own recording rather than mine.
+
 ---
 
-# 1.13.2: the ladder cap was not looking at most of the ladders
+# 1.15.1: the ladder cap was not looking at most of the ladders
 
 1.10.0 shipped two rules that both rest on one question: which markets
 settle together? The engine answered it with a regex that stripped a
