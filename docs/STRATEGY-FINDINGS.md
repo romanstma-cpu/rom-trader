@@ -1445,3 +1445,88 @@ The first of those is the regression this release nearly shipped, caught
 in the wild rather than in a test. Before the lock started carrying the
 ticker that lost, all fifteen of those markets would have been told a
 sibling stopped out — for a loss each of them took on its own line.
+=======
+# The order book: a real signal, and still not money
+
+Depth was the last free input Kalshi publishes that this app had never stored.
+It cannot be backfilled — a resolved book is gone — so 1.14.0 started recording
+it blind, before the study that reads it existed. Twenty-four hours later there
+were 79,772 snapshots across 2,334 markets, and `scripts/book.js` ran two tests
+against them.
+
+## The tick test found something, and this is the first time
+
+Does book imbalance predict the next minute's mid? On 74,820 snapshots across
+**845 independent events**:
+
+```
+  asks stacked   -0.31c   [-0.47, -0.16]
+  ask lean       -0.24c   [-0.44, -0.02]
+  balanced       +0.04c   [-0.10, +0.19]
+  bid lean       +0.46c   [+0.25, +0.69]
+  bids stacked   +0.39c   [+0.23, +0.56]
+```
+
+That column is monotone through the middle, it is centred almost exactly on zero
+where the book is balanced, and the tails do not overlap: bid-heavy books moved
++0.42c against ask-heavy at −0.28c, a spread of **0.70c** with clustered
+intervals that stay apart.
+
+After seven strategies and four inputs, that is the first thing in this project
+that is a real, statistically clean, event-clustered signal. Resting orders do
+carry information about where the price goes next.
+
+## And it is four times too small to touch
+
+Crossing the spread and paying the fee costs roughly three cents. The signal is
+seven tenths of one. So the honest reading of the tick test was never "we found
+an edge" — it was "we have now bounded the edge, and the bound is below the
+cost".
+
+The settlement test confirms it empirically rather than by argument. On 1,875
+markets across 373 events the residual does not rise with bid pressure at all
+(1.8, 4.7, 1.9, 5.7, 1.0 pp, every interval straddling zero), and following the
+book loses at every threshold with intervals that exclude zero on the LOSING
+side:
+
+```
+  |imb| >= 0.15   -6.10c   [-8.96, -3.46]
+  |imb| >= 0.30   -6.59c   [-9.87, -3.42]
+  |imb| >= 0.50   -7.49c   [-11.07, -3.85]
+  |imb| >= 0.70   -9.77c   [-14.18, -5.55]
+```
+
+Reliably negative, and more negative the harder you lean on the signal — which
+is exactly the shape of a real predictor being eaten by a fixed cost. The
+stronger the imbalance, the more certain the trade, the more spread you pay to
+get it.
+
+## Why the two-test design earned itself
+
+The tick test needs only quotes and depth, so it produced a readable answer
+within an hour of the recorder starting; the settlement test needed markets to
+close and took a day. Running the cheap one first bounded the effect at about a
+cent while there was still time to abandon the expensive one.
+
+It did not need abandoning, but the principle held: the tick test predicted the
+settlement result before the settlement data existed, and the settlement result
+arrived agreeing with it.
+
+## Where that leaves the search
+
+Eight studies, eight negatives, and the free inputs are exhausted — quotes,
+settlements, spot, the tape, and now the order book. The last of them found a
+genuine signal and measured it as unreachable, which is a better ending than
+another shrug.
+
+Both sides of the trade stay closed for the reasons already measured: as taker
+the spread plus the fee exceeds the mispricing in every band, and as maker the
+fee is genuinely zero but resting orders eat −12.4pp of adverse selection. A
+one-cent predictive signal does not rescue either.
+
+## Caveat, standing
+
+Stronger, and more specific than before. There is now a measured signal in this
+market and a measured reason it cannot be traded at this resolution. Nothing
+here has a demonstrated forward edge, and the Evidence page will say so on your
+own recording.
